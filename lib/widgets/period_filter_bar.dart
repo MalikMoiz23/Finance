@@ -18,10 +18,7 @@ class PeriodFilterBar extends StatelessWidget {
 
     return Column(
       children: [
-        _PeriodPills(
-          selected: store.period,
-          onChanged: store.setPeriod,
-        ),
+        _PeriodPills(selected: store.period, onChanged: store.setPeriod),
         const SizedBox(height: 10),
         Row(
           children: [

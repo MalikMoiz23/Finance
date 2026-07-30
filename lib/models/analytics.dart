@@ -256,10 +256,9 @@ abstract final class Analytics {
   /// candidate halves cleanly, so the mid gridline is also a round number.
   static double niceCeiling(double raw) {
     if (raw <= 0) return 1000;
-    final magnitude = math.pow(
-      10,
-      (math.log(raw) / math.ln10).floor(),
-    ).toDouble();
+    final magnitude = math
+        .pow(10, (math.log(raw) / math.ln10).floor())
+        .toDouble();
     for (final step in const [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 10.0]) {
       final candidate = magnitude * step;
       if (candidate >= raw) return candidate;

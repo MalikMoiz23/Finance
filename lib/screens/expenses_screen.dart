@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../core/app_theme.dart';
+import '../core/error_messages.dart';
 import '../core/formatters.dart';
 import '../models/expense.dart';
 import '../models/expense_category.dart';
@@ -66,205 +67,225 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
       rows.add(expense);
     }
 
-    return CustomScrollView(
-      slivers: [
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(
-            AppSizes.gutter,
-            6,
-            AppSizes.gutter,
-            0,
-          ),
-          sliver: SliverList.list(
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Expenses',
-                          style: context.text.titleMedium?.copyWith(
-                            fontSize: 19,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '${filtered.length} of ${summary.count} in this '
-                          '${store.period.noun} · ${Money.format(filteredTotal)}',
-                          style: context.text.bodySmall?.copyWith(
-                            color: viz.inkMuted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              const PeriodFilterBar(),
-              const SizedBox(height: 14),
-              TextField(
-                controller: _search,
-                onChanged: (value) => setState(() => _query = value.trim()),
-                textInputAction: TextInputAction.search,
-                decoration: InputDecoration(
-                  hintText: 'Search notes, categories, amounts',
-                  prefixIcon: Icon(
-                    Icons.search_rounded,
-                    size: 20,
-                    color: viz.inkMuted,
-                  ),
-                  suffixIcon: _query.isEmpty
-                      ? null
-                      : IconButton(
-                          tooltip: 'Clear search',
-                          icon: const Icon(Icons.close_rounded, size: 18),
-                          onPressed: () {
-                            _search.clear();
-                            setState(() => _query = '');
-                          },
-                        ),
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-          ),
-        ),
-        SliverToBoxAdapter(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: AppSizes.gutter),
-            child: Row(
-              children: [
-                _FilterPill(
-                  label: 'All',
-                  selected: _category == null,
-                  onTap: () => setState(() => _category = null),
-                ),
-                for (final category in ExpenseCategory.values) ...[
-                  const SizedBox(width: 8),
-                  _FilterPill(
-                    label: category.label,
-                    dotColor: category.colorOf(context),
-                    selected: _category == category,
-                    onTap: () => setState(
-                      () => _category = _category == category ? null : category,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-        if (rows.isEmpty)
+    return RefreshIndicator(
+      onRefresh: store.refresh,
+      color: viz.series,
+      child: CustomScrollView(
+        slivers: [
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(
               AppSizes.gutter,
-              24,
+              6,
               AppSizes.gutter,
               0,
             ),
-            sliver: SliverToBoxAdapter(
-              child: SectionCard(
-                child: summary.count == 0
-                    ? EmptyState(
-                        icon: Icons.receipt_long_rounded,
-                        title: 'Nothing logged in this ${store.period.noun}',
-                        message:
-                            'Step back with the arrows above, or add a new '
-                            'expense.',
-                        actionLabel: 'Add expense',
-                        onAction: () => ExpenseEditorSheet.show(context),
-                      )
-                    : const EmptyState(
-                        icon: Icons.filter_alt_off_rounded,
-                        title: 'No matches',
-                        message: 'Try a different search term or category.',
-                      ),
-              ),
-            ),
-          )
-        else
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(
-              AppSizes.gutter,
-              14,
-              AppSizes.gutter,
-              110,
-            ),
-            sliver: SliverList.builder(
-              itemCount: rows.length,
-              itemBuilder: (context, index) {
-                final row = rows[index];
-                if (row is _DayHeader) {
-                  return Padding(
-                    padding: EdgeInsets.only(top: index == 0 ? 0 : 18, bottom: 6),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            Dates.relativeDay(row.day),
-                            style: context.text.labelSmall?.copyWith(
-                              color: viz.inkSecondary,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 0.3,
+            sliver: SliverList.list(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Expenses',
+                            style: context.text.titleMedium?.copyWith(
+                              fontSize: 19,
                             ),
                           ),
-                        ),
-                        Text(
-                          Money.format(row.total),
-                          style: context.text.labelSmall?.copyWith(
-                            color: viz.inkMuted,
-                            fontFeatures: const [FontFeature.tabularFigures()],
+                          const SizedBox(height: 2),
+                          Text(
+                            '${filtered.length} of ${summary.count} in this '
+                            '${store.period.noun} · ${Money.format(filteredTotal)}',
+                            style: context.text.bodySmall?.copyWith(
+                              color: viz.inkMuted,
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-
-                final expense = row as Expense;
-                return Dismissible(
-                  key: ValueKey(expense.id),
-                  direction: DismissDirection.endToStart,
-                  background: Container(
-                    alignment: Alignment.centerRight,
-                    padding: const EdgeInsets.only(right: 18),
-                    decoration: BoxDecoration(
-                      color: viz.critical.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: Icon(
-                      Icons.delete_outline_rounded,
-                      color: viz.critical,
-                    ),
-                  ),
-                  onDismissed: (_) {
-                    final messenger = ScaffoldMessenger.of(context);
-                    store.delete(expense.id);
-                    messenger.showSnackBar(
-                      SnackBar(
-                        content: Text('Deleted ${expense.title}'),
-                        action: SnackBarAction(
-                          label: 'Undo',
-                          onPressed: () => store.save(expense),
-                        ),
+                        ],
                       ),
-                    );
-                  },
-                  child: ExpenseTile(
-                    expense: expense,
-                    showDate: false,
-                    onTap: () =>
-                        ExpenseEditorSheet.show(context, existing: expense),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                const PeriodFilterBar(),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _search,
+                  onChanged: (value) => setState(() => _query = value.trim()),
+                  textInputAction: TextInputAction.search,
+                  decoration: InputDecoration(
+                    hintText: 'Search notes, categories, amounts',
+                    prefixIcon: Icon(
+                      Icons.search_rounded,
+                      size: 20,
+                      color: viz.inkMuted,
+                    ),
+                    suffixIcon: _query.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear search',
+                            icon: const Icon(Icons.close_rounded, size: 18),
+                            onPressed: () {
+                              _search.clear();
+                              setState(() => _query = '');
+                            },
+                          ),
                   ),
-                );
-              },
+                ),
+                const SizedBox(height: 12),
+              ],
             ),
           ),
-      ],
+          SliverToBoxAdapter(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: AppSizes.gutter),
+              child: Row(
+                children: [
+                  _FilterPill(
+                    label: 'All',
+                    selected: _category == null,
+                    onTap: () => setState(() => _category = null),
+                  ),
+                  for (final category in ExpenseCategory.values) ...[
+                    const SizedBox(width: 8),
+                    _FilterPill(
+                      label: category.label,
+                      dotColor: category.colorOf(context),
+                      selected: _category == category,
+                      onTap: () => setState(
+                        () =>
+                            _category = _category == category ? null : category,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          if (rows.isEmpty)
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(
+                AppSizes.gutter,
+                24,
+                AppSizes.gutter,
+                0,
+              ),
+              sliver: SliverToBoxAdapter(
+                child: SectionCard(
+                  child: summary.count == 0
+                      ? EmptyState(
+                          icon: Icons.receipt_long_rounded,
+                          title: 'Nothing logged in this ${store.period.noun}',
+                          message:
+                              'Step back with the arrows above, or add a new '
+                              'expense.',
+                          actionLabel: 'Add expense',
+                          onAction: () => ExpenseEditorSheet.show(context),
+                        )
+                      : const EmptyState(
+                          icon: Icons.filter_alt_off_rounded,
+                          title: 'No matches',
+                          message: 'Try a different search term or category.',
+                        ),
+                ),
+              ),
+            )
+          else
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(
+                AppSizes.gutter,
+                14,
+                AppSizes.gutter,
+                110,
+              ),
+              sliver: SliverList.builder(
+                itemCount: rows.length,
+                itemBuilder: (context, index) {
+                  final row = rows[index];
+                  if (row is _DayHeader) {
+                    return Padding(
+                      padding: EdgeInsets.only(
+                        top: index == 0 ? 0 : 18,
+                        bottom: 6,
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              Dates.relativeDay(row.day),
+                              style: context.text.labelSmall?.copyWith(
+                                color: viz.inkSecondary,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.3,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            Money.format(row.total),
+                            style: context.text.labelSmall?.copyWith(
+                              color: viz.inkMuted,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+
+                  final expense = row as Expense;
+                  return Dismissible(
+                    key: ValueKey(expense.id),
+                    direction: DismissDirection.endToStart,
+                    background: Container(
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.only(right: 18),
+                      decoration: BoxDecoration(
+                        color: viz.critical.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Icon(
+                        Icons.delete_outline_rounded,
+                        color: viz.critical,
+                      ),
+                    ),
+                    // The row only leaves the list once the server confirms the
+                    // delete; if it fails the row springs back with the reason.
+                    confirmDismiss: (_) async {
+                      final messenger = ScaffoldMessenger.of(context);
+                      try {
+                        await store.remove(expense.id);
+                        messenger.showSnackBar(
+                          SnackBar(
+                            content: Text('Deleted ${expense.title}'),
+                            action: SnackBarAction(
+                              label: 'Undo',
+                              onPressed: () => store.restore(expense),
+                            ),
+                          ),
+                        );
+                        return true;
+                      } catch (error) {
+                        messenger.showSnackBar(
+                          SnackBar(content: Text(describeError(error))),
+                        );
+                        return false;
+                      }
+                    },
+                    child: ExpenseTile(
+                      expense: expense,
+                      showDate: false,
+                      onTap: () =>
+                          ExpenseEditorSheet.show(context, existing: expense),
+                    ),
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

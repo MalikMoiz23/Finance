@@ -6,7 +6,8 @@ abstract final class Money {
   static const symbol = 'Rs';
 
   /// `Rs 12,480`
-  static String format(num value) => '$symbol ${_grouped.format(value.round())}';
+  static String format(num value) =>
+      '$symbol ${_grouped.format(value.round())}';
 
   /// `12,480` — for places where the symbol is already on screen.
   static String plain(num value) => _grouped.format(value.round());
@@ -15,7 +16,9 @@ abstract final class Money {
   static String compact(num value, {bool withSymbol = true}) {
     final prefix = withSymbol ? '$symbol ' : '';
     final abs = value.abs();
-    if (abs >= 10000000) return '$prefix${(value / 10000000).toStringAsFixed(1)}cr';
+    if (abs >= 10000000) {
+      return '$prefix${(value / 10000000).toStringAsFixed(1)}cr';
+    }
     if (abs >= 100000) return '$prefix${(value / 100000).toStringAsFixed(1)}L';
     if (abs >= 1000) {
       final k = value / 1000;

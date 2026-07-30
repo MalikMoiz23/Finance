@@ -3,21 +3,39 @@
 Flutter app for tracking household spending: log an expense, then read it back by
 **week / month / year** and see which categories the money went to.
 
-Currency is **PKR** (`Rs 1,250`, no decimals). There is **no database** — expenses
-are stored as one JSON string in `shared_preferences`, so data survives a restart
-but stays entirely on the device.
+Currency is **PKR** (`Rs 1,250`, no decimals). Data lives in **Supabase**
+(Postgres + auth): every account registers with name, email and password, and
+row level security means an account can only ever read or write its own
+expenses.
+
+## Setup (once)
+
+1. **Key** — Supabase dashboard → *Project Settings → API Keys* → copy the
+   `anon public` / *Publishable* key into `_pastedKey` in
+   [lib/core/supabase_config.dart](lib/core/supabase_config.dart), or pass it at
+   run time with `--dart-define=SUPABASE_ANON_KEY=eyJ…`. That key is meant to be
+   public; **never put the `service_role` key in this app**.
+2. **Schema** — *SQL Editor* → paste and run [supabase/schema.sql](supabase/schema.sql).
+   It creates the `expenses` table, its index, and the four RLS policies. Safe to
+   re-run.
+3. **Email confirmation** — *Authentication → Sign In / Providers* → turn
+   **Confirm email** off, so registering logs you straight in. (If you leave it
+   on, the app shows a "confirm your email" notice instead — both paths work.)
+
+Until step 1 is done the app opens a setup screen with these instructions
+instead of failing on the first request.
 
 ## Run it
 
 ```bash
 flutter pub get
 flutter run              # pick a device; also runs on Windows/Chrome
-flutter test             # 22 tests: aggregation maths + full-app widget tests
+flutter test             # 25 tests: aggregation maths + full-app widget tests
 flutter analyze
 ```
 
-First launch seeds ~4 months of sample expenses so the charts aren't empty.
-**Overview → ⋯ → Clear all expenses** wipes it (sample data does not come back).
+New accounts start empty — there is no sample data. **Overview → ⋯ → Clear all
+expenses** deletes every row in the signed-in account.
 
 ## Screens
 
@@ -34,28 +52,52 @@ it, so no two cards can disagree about the numbers.
 
 ```
 lib/
-  main.dart                     boot: load storage, then runApp
-  app.dart                      MaterialApp + theme mode
+  main.dart                     boot: init Supabase, build controllers, runApp
+  app.dart                      MaterialApp + theme mode (+ SetupApp fallback)
   core/
+    supabase_config.dart        url + publishable key (dart-define aware)
     app_theme.dart              validated palette, VizColors theme extension, ThemeData
     formatters.dart             PKR money, compact money, exact axis ticks, dates
+    error_messages.dart         Supabase/transport error -> one actionable sentence
   models/
+    app_user.dart               id, email, name of the signed-in account
     expense.dart                one spend (immutable, JSON)
     expense_category.dart       the 8 categories + their fixed palette slots
     period.dart                 Week/Month/Year, half-open DateRange, anchor maths
     analytics.dart              pure aggregation -> PeriodSummary (unit-tested)
   data/
-    expense_repository.dart     shared_preferences read/write
-    demo_data.dart              seeded sample expenses
+    auth_gateway.dart           AuthGateway interface + Supabase implementation
+    expense_api.dart            ExpenseApi interface + Supabase implementation
+    local_prefs.dart            theme choice + per-user read cache
   state/
-    expense_store.dart          ChangeNotifier: list + period + derived summary
+    auth_controller.dart        session + auth form state
+    expense_store.dart          expenses + period + derived summary, cache/sync
     theme_controller.dart       light/dark/system, persisted
-  screens/                      home_shell, dashboard, insights, expenses, editor sheet
+  screens/                      auth_gate, auth_screen, home_shell, dashboard,
+                                insights, expenses, editor sheet, setup notice
   widgets/                      charts, cards, tiles, filter bar, entrance animations
+supabase/
+  schema.sql                    table + index + RLS policies
 ```
 
-State is `provider` + `ChangeNotifier`. All aggregation lives in `Analytics`
-(no Flutter imports), so the numbers are testable without a widget tree.
+State is `provider` + `ChangeNotifier`. `AuthGateway` and `ExpenseApi` are
+interfaces, so the widget tests drive the real screens against in-memory fakes
+([test/support/fakes.dart](test/support/fakes.dart)) — no network, no project
+needed, and account isolation is actually asserted. All aggregation lives in
+`Analytics` (no Flutter imports), so the numbers are testable without a widget
+tree.
+
+## How data flows
+
+- **Reads**: the on-device cache paints first, then Supabase overwrites it. If
+  the fetch fails, the cached numbers stay on screen and a banner appears with a
+  Retry — the app stays readable with no connection.
+- **Writes**: straight to Supabase, awaited. A failure keeps the sheet open with
+  the reason, and a swipe-to-delete springs back if the server refused it.
+  Nothing is queued for later, so a write always needs internet.
+- **Sessions** persist, so a returning user goes straight to the dashboard.
+- **Names** are stored in the auth user's metadata (`full_name`) — no profiles
+  table, no trigger.
 
 ## Chart decisions worth keeping
 
@@ -79,5 +121,6 @@ These are not stylistic preferences — changing them breaks accessibility:
 
 ## Not built yet
 
-Deliberately out of scope for v1: income/balance, per-category budgets, recurring
-expenses, multi-currency, cloud sync, CSV export.
+Deliberately out of scope: income/balance, per-category budgets, recurring
+expenses, multi-currency, CSV export, password reset (needs redirect URLs and
+deep links), and offline writes (a sync queue).

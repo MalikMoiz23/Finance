@@ -29,8 +29,7 @@ class DateRange {
   }
 
   /// Whole days in the range, safe against clock shifts.
-  int get dayCount =>
-      (endExclusive.difference(start).inHours / 24).round();
+  int get dayCount => (endExclusive.difference(start).inHours / 24).round();
 
   @override
   bool operator ==(Object other) =>

@@ -1,19 +1,19 @@
 import 'package:flutter/material.dart';
 
-import '../data/expense_repository.dart';
+import '../data/local_prefs.dart';
 
-/// Light / dark / follow-system, persisted locally. Dark mode is a selected
-/// palette (its own validated steps), not an inverted light one.
+/// Light / dark / follow-system, persisted on the device. Dark mode is a
+/// selected palette (its own validated steps), not an inverted light one.
 class ThemeController extends ChangeNotifier {
-  ThemeController(this._repository);
+  ThemeController(this._prefs);
 
-  final ExpenseRepository _repository;
+  final LocalPrefs _prefs;
   ThemeMode _mode = ThemeMode.system;
 
   ThemeMode get mode => _mode;
 
   Future<void> initialize() async {
-    _mode = await _repository.loadThemeMode();
+    _mode = await _prefs.loadThemeMode();
     notifyListeners();
   }
 
@@ -25,7 +25,7 @@ class ThemeController extends ChangeNotifier {
       ThemeMode.dark => ThemeMode.system,
     };
     notifyListeners();
-    await _repository.saveThemeMode(_mode);
+    await _prefs.saveThemeMode(_mode);
   }
 
   IconData get icon => switch (_mode) {

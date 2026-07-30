@@ -3,14 +3,20 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../core/app_theme.dart';
+import '../core/error_messages.dart';
 import '../core/formatters.dart';
 import '../models/expense.dart';
 import '../models/expense_category.dart';
+import '../models/item_catalog.dart';
 import '../state/expense_store.dart';
 import '../widgets/category_icon.dart';
+import '../widgets/pressable.dart';
 
-/// Add or edit one expense. Amount first (it is what the user came to type),
-/// then category, then date, then an optional note.
+/// Add or edit one expense: amount, what it was, category, date, note.
+///
+/// The item field learns. Typing "chick" offers "Chicken" from what this account
+/// has bought before — with its category and last price — so a daily entry is
+/// two taps. New accounts get the same completions from a built-in catalogue.
 class ExpenseEditorSheet extends StatefulWidget {
   const ExpenseEditorSheet({super.key, this.existing});
 
@@ -31,10 +37,15 @@ class ExpenseEditorSheet extends StatefulWidget {
 
 class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
   late final TextEditingController _amount;
+  late final TextEditingController _item;
   late final TextEditingController _note;
+  final FocusNode _itemFocus = FocusNode();
+
   late ExpenseCategory _category;
   late DateTime _date;
   String? _error;
+  bool _saving = false;
+  bool _suggestionsOpen = false;
 
   bool get _isEditing => widget.existing != null;
 
@@ -45,9 +56,14 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
     _amount = TextEditingController(
       text: existing == null ? '' : _trimAmount(existing.amount),
     );
+    _item = TextEditingController(text: existing?.item ?? '');
     _note = TextEditingController(text: existing?.note ?? '');
     _category = existing?.category ?? ExpenseCategory.groceries;
     _date = existing?.date ?? dayOnly(DateTime.now());
+
+    _itemFocus.addListener(() {
+      setState(() => _suggestionsOpen = _itemFocus.hasFocus);
+    });
   }
 
   static String _trimAmount(double value) =>
@@ -56,8 +72,25 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
   @override
   void dispose() {
     _amount.dispose();
+    _item.dispose();
     _note.dispose();
+    _itemFocus.dispose();
     super.dispose();
+  }
+
+  /// Filling in one tap: name, category, and the last price paid.
+  void _apply(ItemSuggestion suggestion, {bool closeList = true}) {
+    HapticFeedback.selectionClick();
+    setState(() {
+      _item.text = suggestion.name;
+      _category = suggestion.category;
+      if (_amount.text.trim().isEmpty && suggestion.typicalAmount != null) {
+        _amount.text = _trimAmount(suggestion.typicalAmount!);
+      }
+      _error = null;
+      if (closeList) _suggestionsOpen = false;
+    });
+    if (closeList) _itemFocus.unfocus();
   }
 
   Future<void> _pickDate() async {
@@ -72,6 +105,8 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
     if (picked != null) setState(() => _date = dayOnly(picked));
   }
 
+  /// Writes straight to Supabase. On failure the sheet stays open with the
+  /// message, so nothing the user typed is lost.
   Future<void> _save() async {
     final raw = _amount.text.replaceAll(',', '').trim();
     final parsed = double.tryParse(raw);
@@ -79,67 +114,107 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
       setState(() => _error = 'Enter an amount greater than 0');
       return;
     }
+    if (_saving) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
 
     final store = context.read<ExpenseStore>();
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
+    final existing = widget.existing;
 
-    final expense =
-        widget.existing?.copyWith(
+    try {
+      if (existing == null) {
+        await store.create(
           amount: parsed,
           category: _category,
           date: _date,
-          note: _note.text,
-        ) ??
-        Expense(
-          id: store.newId(),
-          amount: parsed,
-          category: _category,
-          date: _date,
+          item: _item.text,
           note: _note.text,
         );
-
-    await store.save(expense);
-    // Never save an entry out of sight: pull the window onto its date.
-    store.focusOn(expense.date);
-
-    navigator.pop();
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          _isEditing
-              ? 'Updated ${Money.format(expense.amount)} · ${expense.category.label}'
-              : 'Added ${Money.format(expense.amount)} · ${expense.category.label}',
+      } else {
+        await store.update(
+          existing.copyWith(
+            amount: parsed,
+            category: _category,
+            date: _date,
+            item: _item.text,
+            note: _note.text,
+          ),
+        );
+      }
+      // Never save an entry out of sight: pull the window onto its date.
+      store.focusOn(_date);
+      navigator.pop();
+      final what = _item.text.trim().isEmpty
+          ? _category.label
+          : _item.text.trim();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            '${existing == null ? 'Added' : 'Updated'} '
+            '${Money.format(parsed)} · $what',
+          ),
         ),
-      ),
-    );
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = describeError(error);
+      });
+    }
   }
 
   Future<void> _delete() async {
     final existing = widget.existing;
-    if (existing == null) return;
+    if (existing == null || _saving) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+
     final store = context.read<ExpenseStore>();
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
 
-    await store.delete(existing.id);
-    navigator.pop();
-    messenger.showSnackBar(
-      SnackBar(
-        content: const Text('Expense deleted'),
-        action: SnackBarAction(
-          label: 'Undo',
-          onPressed: () => store.save(existing),
+    try {
+      await store.remove(existing.id);
+      navigator.pop();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Deleted ${existing.title}'),
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () => store.restore(existing),
+          ),
         ),
-      ),
-    );
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = describeError(error);
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final viz = context.viz;
+    final store = context.watch<ExpenseStore>();
     final today = dayOnly(DateTime.now());
     final yesterday = DateTime(today.year, today.month, today.day - 1);
+
+    final query = _item.text.trim();
+    final suggestions = _suggestionsOpen
+        ? store.suggestItems(query)
+        : const <ItemSuggestion>[];
+    final quickAdd = _isEditing
+        ? const <ItemSuggestion>[]
+        : store.recentItems(limit: 5);
 
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
@@ -158,7 +233,7 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
                 ),
                 if (_isEditing)
                   IconButton(
-                    onPressed: _delete,
+                    onPressed: _saving ? null : _delete,
                     tooltip: 'Delete expense',
                     icon: const Icon(Icons.delete_outline_rounded),
                     style: IconButton.styleFrom(
@@ -169,6 +244,8 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
               ],
             ),
             const SizedBox(height: 18),
+
+            // ------------------------------------------------------- amount ---
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
               decoration: BoxDecoration(
@@ -179,7 +256,6 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
                 ),
               ),
               child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Text(
                     Money.symbol,
@@ -199,7 +275,7 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
                       inputFormatters: [
                         FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
                       ],
-                      textInputAction: TextInputAction.done,
+                      textInputAction: TextInputAction.next,
                       onChanged: (_) {
                         if (_error != null) setState(() => _error = null);
                       },
@@ -248,7 +324,82 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
                 ],
               ),
             ],
-            const SizedBox(height: 22),
+
+            // --------------------------------------------------- quick add ---
+            if (quickAdd.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              _FieldLabel('Buy again'),
+              const SizedBox(height: 10),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    for (final suggestion in quickAdd) ...[
+                      _QuickChip(
+                        suggestion: suggestion,
+                        onTap: () => _apply(suggestion, closeList: false),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+
+            // --------------------------------------------------------- item ---
+            const SizedBox(height: 20),
+            _FieldLabel('What did you buy?'),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _item,
+              focusNode: _itemFocus,
+              textCapitalization: TextCapitalization.sentences,
+              textInputAction: TextInputAction.next,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                hintText: 'e.g. Chicken',
+                prefixIcon: Icon(
+                  Icons.shopping_basket_outlined,
+                  size: 19,
+                  color: viz.inkMuted,
+                ),
+                suffixIcon: _item.text.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'Clear item',
+                        icon: const Icon(Icons.close_rounded, size: 18),
+                        onPressed: () => setState(() => _item.clear()),
+                      ),
+              ),
+            ),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOut,
+              alignment: Alignment.topCenter,
+              child: suggestions.isEmpty
+                  ? const SizedBox(width: double.infinity)
+                  : Container(
+                      margin: const EdgeInsets.only(top: 8),
+                      decoration: BoxDecoration(
+                        color: viz.surfaceAlt,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: viz.hairline),
+                      ),
+                      child: Column(
+                        children: [
+                          for (var i = 0; i < suggestions.length; i++)
+                            _SuggestionRow(
+                              suggestion: suggestions[i],
+                              first: i == 0,
+                              onTap: () => _apply(suggestions[i]),
+                            ),
+                        ],
+                      ),
+                    ),
+            ),
+
+            // ----------------------------------------------------- category ---
+            const SizedBox(height: 20),
             _FieldLabel('Category'),
             const SizedBox(height: 12),
             Wrap(
@@ -259,10 +410,15 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
                   _CategoryOption(
                     category: category,
                     selected: category == _category,
-                    onTap: () => setState(() => _category = category),
+                    onTap: () {
+                      HapticFeedback.selectionClick();
+                      setState(() => _category = category);
+                    },
                   ),
               ],
             ),
+
+            // --------------------------------------------------------- date ---
             const SizedBox(height: 22),
             _FieldLabel('Date'),
             const SizedBox(height: 12),
@@ -292,6 +448,8 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
                 ),
               ],
             ),
+
+            // --------------------------------------------------------- note ---
             const SizedBox(height: 22),
             _FieldLabel('Note (optional)'),
             const SizedBox(height: 12),
@@ -299,28 +457,40 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
               controller: _note,
               textCapitalization: TextCapitalization.sentences,
               decoration: const InputDecoration(
-                hintText: 'e.g. weekly grocery run',
+                hintText: 'e.g. weekend stock, Al-Fatah',
               ),
             ),
+
             const SizedBox(height: 26),
             SizedBox(
               height: 54,
               child: FilledButton(
-                onPressed: _save,
+                onPressed: _saving ? null : _save,
                 style: FilledButton.styleFrom(
                   backgroundColor: viz.series,
                   foregroundColor: Colors.white,
+                  disabledBackgroundColor: viz.series.withValues(alpha: 0.5),
+                  disabledForegroundColor: Colors.white70,
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(16),
                   ),
                 ),
-                child: Text(
-                  _isEditing ? 'Save changes' : 'Add expense',
-                  style: context.text.titleSmall?.copyWith(
-                    color: Colors.white,
-                    fontSize: 16,
-                  ),
-                ),
+                child: _saving
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : Text(
+                        _isEditing ? 'Save changes' : 'Add expense',
+                        style: context.text.titleSmall?.copyWith(
+                          color: Colors.white,
+                          fontSize: 16,
+                        ),
+                      ),
               ),
             ),
           ],
@@ -348,6 +518,127 @@ class _FieldLabel extends StatelessWidget {
   }
 }
 
+/// One autocomplete row: what it is, which category it will file under, and the
+/// price last paid for it.
+class _SuggestionRow extends StatelessWidget {
+  const _SuggestionRow({
+    required this.suggestion,
+    required this.first,
+    required this.onTap,
+  });
+
+  final ItemSuggestion suggestion;
+  final bool first;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    return Pressable(
+      onTap: onTap,
+      scale: 0.99,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+        decoration: BoxDecoration(
+          border: first ? null : Border(top: BorderSide(color: viz.hairline)),
+        ),
+        child: Row(
+          children: [
+            CategoryIcon(category: suggestion.category, size: 30, iconSize: 15),
+            const SizedBox(width: 11),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    suggestion.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.text.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: viz.inkPrimary,
+                    ),
+                  ),
+                  Text(
+                    suggestion.fromHistory
+                        ? '${suggestion.category.label} · bought ${suggestion.uses}×'
+                        : suggestion.category.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.text.labelSmall?.copyWith(
+                      color: viz.inkMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (suggestion.typicalAmount != null) ...[
+              const SizedBox(width: 8),
+              Text(
+                Money.format(suggestion.typicalAmount!),
+                style: context.text.labelLarge?.copyWith(
+                  color: viz.series,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "Buy again" chip: one tap fills item, category and last price.
+class _QuickChip extends StatelessWidget {
+  const _QuickChip({required this.suggestion, required this.onTap});
+
+  final ItemSuggestion suggestion;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    final color = suggestion.category.colorOf(context);
+    return Pressable(
+      onTap: onTap,
+      scale: 0.95,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: viz.surface,
+          borderRadius: BorderRadius.circular(13),
+          border: Border.all(color: viz.hairline),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              suggestion.name,
+              style: context.text.labelLarge?.copyWith(
+                color: viz.inkPrimary,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (suggestion.typicalAmount != null) ...[
+              const SizedBox(width: 7),
+              Text(
+                Money.compact(suggestion.typicalAmount!),
+                style: context.text.labelSmall?.copyWith(color: viz.inkMuted),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _CategoryOption extends StatelessWidget {
   const _CategoryOption({
     required this.category,
@@ -363,8 +654,7 @@ class _CategoryOption extends StatelessWidget {
   Widget build(BuildContext context) {
     return SizedBox(
       width: 74,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
+      child: Pressable(
         onTap: onTap,
         child: Column(
           children: [
@@ -412,9 +702,9 @@ class _DateChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final viz = context.viz;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
+    return Pressable(
       onTap: onTap,
+      scale: 0.96,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -423,13 +713,10 @@ class _DateChip extends StatelessWidget {
               ? viz.series.withValues(alpha: context.isDarkMode ? 0.24 : 0.12)
               : viz.surfaceAlt,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: selected ? viz.series : Colors.transparent,
-          ),
+          border: Border.all(color: selected ? viz.series : Colors.transparent),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
             if (icon != null) ...[
               Icon(

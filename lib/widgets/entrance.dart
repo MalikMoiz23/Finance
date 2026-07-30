@@ -20,11 +20,10 @@ class ScreenIntro extends StatefulWidget {
 
 class _ScreenIntroState extends State<ScreenIntro>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _controller =
-      AnimationController(
-        vsync: this,
-        duration: const Duration(milliseconds: 900),
-      )..forward();
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..forward();
 
   @override
   void dispose() {

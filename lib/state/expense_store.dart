@@ -1,66 +1,233 @@
 import 'package:flutter/foundation.dart';
 
+import '../core/error_messages.dart';
 import '../core/formatters.dart';
-import '../data/demo_data.dart';
-import '../data/expense_repository.dart';
+import '../data/budget_api.dart';
+import '../data/expense_api.dart';
+import '../data/local_prefs.dart';
 import '../models/analytics.dart';
+import '../models/app_user.dart';
+import '../models/budget.dart';
 import '../models/expense.dart';
+import '../models/expense_category.dart';
+import '../models/item_catalog.dart';
 import '../models/period.dart';
 
-/// Single source of truth for the expense list and the period the whole UI is
-/// scoped by. Every screen reads its numbers from [summary], so the dashboard,
-/// insights and list can never disagree.
+/// Single source of truth for the signed-in account's expenses, budgets, and the
+/// period the whole UI is scoped by.
+///
+/// Reads: the on-device cache paints first, then Supabase overwrites it. If the
+/// fetch fails, the cached list stays on screen and [syncError] is set, so the
+/// app is readable offline even though writes need a connection.
+///
+/// Writes: straight to Supabase. Every mutating method throws on failure so the
+/// calling screen can show the message and keep the user's input.
 class ExpenseStore extends ChangeNotifier {
-  ExpenseStore(this._repository) {
+  ExpenseStore({
+    required ExpenseApi api,
+    required BudgetApi budgetApi,
+    required LocalPrefs prefs,
+  }) : _api = api,
+       _budgetApi = budgetApi,
+       _prefs = prefs {
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
     _summary = _compute();
   }
 
-  final ExpenseRepository _repository;
+  final ExpenseApi _api;
+  final BudgetApi _budgetApi;
+  final LocalPrefs _prefs;
 
   final List<Expense> _expenses = [];
+  final List<Budget> _budgets = [];
   Period _period = Period.month;
   late DateTime _anchor;
   late PeriodSummary _summary;
-  bool _loading = true;
+
+  String? _userId;
+  bool _loading = false;
+  bool _loadedFromServer = false;
+  String? _syncError;
+  bool _disposed = false;
 
   bool get isLoading => _loading;
   Period get period => _period;
   DateTime get anchor => _anchor;
   PeriodSummary get summary => _summary;
   int get totalEntryCount => _expenses.length;
-
-  /// Newest first.
   List<Expense> get allExpenses => List.unmodifiable(_expenses);
+  List<Budget> get budgets => List.unmodifiable(_budgets);
+
+  /// Why the last sync failed, or null when the data on screen is fresh.
+  String? get syncError => _syncError;
+
+  bool get isShowingCachedData => _syncError != null && !_loadedFromServer;
 
   String get rangeLabel => Periods.rangeLabel(_period, _anchor);
 
   String? get relativeRangeLabel =>
       Periods.relativeLabel(_period, _anchor, DateTime.now());
 
-  /// False once the anchor has reached the period containing today — there is
-  /// nothing to show in the future.
   bool get canGoForward {
     final next = Periods.rangeOf(_period, Periods.shift(_period, _anchor, 1));
     return !next.start.isAfter(dayOnly(DateTime.now()));
   }
 
-  Future<void> initialize() async {
-    final stored = await _repository.loadExpenses();
-    _expenses
-      ..clear()
-      ..addAll(stored);
+  // ------------------------------------------------------------- budgets ---
 
-    if (_expenses.isEmpty && !await _repository.hasSeededDemoData()) {
-      _expenses.addAll(DemoData.generate());
-      await _repository.markDemoDataSeeded();
-      await _repository.saveExpenses(_expenses);
+  /// Budgets are monthly, so they always report against the current calendar
+  /// month regardless of which period the dashboard is showing.
+  DateRange get budgetMonth => Periods.rangeOf(Period.month, DateTime.now());
+
+  String get budgetMonthLabel => Dates.monthYear(budgetMonth.start);
+
+  double spentThisMonth(ExpenseCategory category) => _expenses
+      .where((e) => e.category == category && budgetMonth.contains(e.date))
+      .fold<double>(0, (sum, e) => sum + e.amount);
+
+  double get totalSpentThisMonth => _expenses
+      .where((e) => budgetMonth.contains(e.date))
+      .fold<double>(0, (sum, e) => sum + e.amount);
+
+  int get daysLeftThisMonth {
+    final today = dayOnly(DateTime.now());
+    if (!budgetMonth.contains(today)) return 0;
+    return budgetMonth.endExclusive.difference(today).inDays;
+  }
+
+  /// Worst first, so what needs attention is at the top.
+  List<BudgetStatus> get budgetStatuses {
+    final statuses = _budgets
+        .map(
+          (budget) => BudgetStatus(
+            budget: budget,
+            spent: spentThisMonth(budget.category),
+            daysLeft: daysLeftThisMonth,
+          ),
+        )
+        .toList();
+    statuses.sort((a, b) => b.ratio.compareTo(a.ratio));
+    return statuses;
+  }
+
+  Budget? budgetFor(ExpenseCategory category) =>
+      _budgets.where((b) => b.category == category).firstOrNull;
+
+  int get overBudgetCount =>
+      budgetStatuses.where((s) => s.band == BudgetBand.overBudget).length;
+
+  double get totalBudgeted =>
+      _budgets.fold<double>(0, (sum, b) => sum + b.monthlyLimit);
+
+  /// Spending inside categories that actually have a limit set.
+  double get spentAgainstBudgets =>
+      _budgets.fold<double>(0, (sum, b) => sum + spentThisMonth(b.category));
+
+  Future<void> saveBudget(ExpenseCategory category, double monthlyLimit) async {
+    final saved = await _budgetApi.save(category, monthlyLimit);
+    final index = _budgets.indexWhere((b) => b.category == category);
+    if (index == -1) {
+      _budgets.add(saved);
+    } else {
+      _budgets[index] = saved;
+    }
+    _refresh();
+    await _persistCache();
+  }
+
+  Future<void> removeBudget(ExpenseCategory category) async {
+    await _budgetApi.remove(category);
+    _budgets.removeWhere((b) => b.category == category);
+    _refresh();
+    await _persistCache();
+  }
+
+  // --------------------------------------------------------------- items ---
+
+  /// Autocomplete for the item field: own history first, then the catalogue.
+  List<ItemSuggestion> suggestItems(String query, {int limit = 6}) =>
+      ItemCatalog.suggest(query: query, history: _expenses, limit: limit);
+
+  /// One-tap "buy again" chips.
+  List<ItemSuggestion> recentItems({int limit = 6}) =>
+      ItemCatalog.recent(_expenses, limit: limit);
+
+  // ---------------------------------------------------------- load / sync ---
+
+  /// Points the store at an account, or clears it on sign-out.
+  Future<void> bindUser(AppUser? user) async {
+    if (user == null) {
+      _userId = null;
+      _expenses.clear();
+      _budgets.clear();
+      _loading = false;
+      _loadedFromServer = false;
+      _syncError = null;
+      jumpToToday();
+      return;
     }
 
-    _sort();
+    if (user.id == _userId) return;
+    _userId = user.id;
+    _expenses.clear();
+    _budgets.clear();
+    _loadedFromServer = false;
+    _syncError = null;
+    _anchor = Periods.normalizeAnchor(_period, DateTime.now());
+
+    final cached = await _prefs.readCache(user.id);
+    final cachedBudgets = await _prefs.readBudgets(user.id);
+    if (_userId != user.id) return; // switched accounts mid-read
+    if (cached.isNotEmpty) {
+      _expenses.addAll(cached);
+      _sort();
+    }
+    _budgets.addAll(cachedBudgets);
+    _refresh();
+
+    await refresh();
+  }
+
+  /// Re-fetches from Supabase. Keeps whatever is on screen if it fails.
+  Future<void> refresh() async {
+    final userId = _userId;
+    if (userId == null) return;
+
+    _loading = true;
+    _refresh();
+    try {
+      final rows = await _api.fetchAll();
+      if (_userId != userId) return;
+      _expenses
+        ..clear()
+        ..addAll(rows);
+      _sort();
+      _loadedFromServer = true;
+      _syncError = null;
+    } catch (error) {
+      if (_userId != userId) return;
+      _syncError = describeError(error);
+    }
+
+    // Budgets are an optional layer: if that table is unreachable the expenses
+    // above must still render, so this failure is kept out of syncError.
+    try {
+      final rows = await _budgetApi.fetchAll();
+      if (_userId != userId) return;
+      _budgets
+        ..clear()
+        ..addAll(rows);
+    } catch (_) {
+      // Keep whatever budgets the cache gave us.
+    }
+
+    if (_userId != userId) return;
+    await _persistCache();
     _loading = false;
     _refresh();
   }
+
+  // -------------------------------------------------------------- period ---
 
   void setPeriod(Period period) {
     if (period == _period) return;
@@ -95,35 +262,75 @@ class ExpenseStore extends ChangeNotifier {
     _refresh();
   }
 
-  /// Adds a new expense, or replaces the one with the same id.
-  Future<void> save(Expense expense) async {
-    final index = _expenses.indexWhere((e) => e.id == expense.id);
+  // ------------------------------------------------------------- expenses ---
+
+  Future<void> create({
+    required double amount,
+    required ExpenseCategory category,
+    required DateTime date,
+    required String item,
+    required String note,
+  }) async {
+    final created = await _api.create(
+      amount: amount,
+      category: category,
+      date: date,
+      item: item,
+      note: note,
+    );
+    _expenses.add(created);
+    _sort();
+    _syncError = null;
+    _refresh();
+    await _persistCache();
+  }
+
+  Future<void> update(Expense expense) async {
+    final saved = await _api.update(expense);
+    final index = _expenses.indexWhere((e) => e.id == saved.id);
     if (index == -1) {
-      _expenses.add(expense);
+      _expenses.add(saved);
     } else {
-      _expenses[index] = expense;
+      _expenses[index] = saved;
     }
     _sort();
+    _syncError = null;
     _refresh();
-    await _persist();
+    await _persistCache();
   }
 
-  Future<void> delete(String id) async {
+  Future<void> remove(String id) async {
+    await _api.delete(id);
     _expenses.removeWhere((e) => e.id == id);
+    _syncError = null;
     _refresh();
-    await _persist();
+    await _persistCache();
   }
+
+  /// Undo for a deleted expense: the row is gone, so this writes it back as a
+  /// new row with the same values.
+  Future<void> restore(Expense expense) => create(
+    amount: expense.amount,
+    category: expense.category,
+    date: expense.date,
+    item: expense.item,
+    note: expense.note,
+  );
 
   Future<void> clearAll() async {
+    await _api.deleteAll();
     _expenses.clear();
+    _syncError = null;
     _refresh();
-    await _persist();
+    await _persistCache();
   }
 
-  /// Next unused id. Microseconds keep it unique per entry.
-  String newId() => 'e${DateTime.now().microsecondsSinceEpoch}';
-
-  Future<void> _persist() => _repository.saveExpenses(_expenses);
+  Future<void> _persistCache() async {
+    final userId = _userId;
+    if (userId == null) return;
+    await _prefs.writeCache(userId, _expenses);
+    await _prefs.writeBudgets(userId, _budgets);
+  }
 
   void _sort() {
     _expenses.sort((a, b) {
@@ -141,6 +348,12 @@ class ExpenseStore extends ChangeNotifier {
 
   void _refresh() {
     _summary = _compute();
-    notifyListeners();
+    if (!_disposed) notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
   }
 }

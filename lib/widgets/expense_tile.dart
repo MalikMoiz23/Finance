@@ -4,6 +4,7 @@ import '../core/app_theme.dart';
 import '../core/formatters.dart';
 import '../models/expense.dart';
 import 'category_icon.dart';
+import 'pressable.dart';
 
 class ExpenseTile extends StatelessWidget {
   const ExpenseTile({
@@ -20,13 +21,18 @@ class ExpenseTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final viz = context.viz;
-    final subtitle = showDate
-        ? '${expense.category.label} · ${Dates.relativeDay(expense.date)}'
-        : expense.category.label;
+    // The title is what was bought; the line under it carries whatever is left
+    // over — category, note, and the date when the list is not day-grouped.
+    final details = <String>[
+      expense.category.label,
+      if (expense.item.trim().isNotEmpty && expense.note.trim().isNotEmpty)
+        expense.note.trim(),
+      if (showDate) Dates.relativeDay(expense.date),
+    ];
+    final subtitle = details.join(' · ');
 
-    return InkWell(
+    return Pressable(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
         child: Row(

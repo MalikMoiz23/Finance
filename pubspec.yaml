@@ -37,6 +37,7 @@ dependencies:
   intl: ^0.20.3
   provider: ^6.1.5+1
   shared_preferences: ^2.5.5
+  supabase_flutter: ^2.16.0
 
 dev_dependencies:
   flutter_test:

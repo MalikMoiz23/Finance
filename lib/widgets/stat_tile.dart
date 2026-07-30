@@ -93,10 +93,7 @@ class StatTile extends StatelessWidget {
           ],
           if (points != null && points.length > 1) ...[
             const SizedBox(height: 10),
-            SizedBox(
-              height: 24,
-              child: Sparkline(values: points),
-            ),
+            SizedBox(height: 24, child: Sparkline(values: points)),
           ],
         ],
       ),

@@ -47,6 +47,7 @@ abstract final class AppColors {
 
   // Status scale (fixed, never themed, always shipped with an icon + label).
   static const good = Color(0xFF0CA30C);
+  static const warning = Color(0xFFFAB219);
   static const critical = Color(0xFFD03B3B);
   static const successTextLight = Color(0xFF006300);
   static const successTextDark = Color(0xFF0CA30C);
@@ -69,6 +70,7 @@ class VizColors extends ThemeExtension<VizColors> {
     required this.seriesDeEmphasis,
     required this.seriesTrack,
     required this.good,
+    required this.warning,
     required this.critical,
     required this.successText,
   });
@@ -87,6 +89,7 @@ class VizColors extends ThemeExtension<VizColors> {
     seriesDeEmphasis: AppColors.seriesDeEmphasisLight,
     seriesTrack: AppColors.seriesTrackLight,
     good: AppColors.good,
+    warning: AppColors.warning,
     critical: AppColors.critical,
     successText: AppColors.successTextLight,
   );
@@ -105,6 +108,7 @@ class VizColors extends ThemeExtension<VizColors> {
     seriesDeEmphasis: AppColors.seriesDeEmphasisDark,
     seriesTrack: AppColors.seriesTrackDark,
     good: AppColors.good,
+    warning: AppColors.warning,
     critical: AppColors.critical,
     successText: AppColors.successTextDark,
   );
@@ -122,6 +126,11 @@ class VizColors extends ThemeExtension<VizColors> {
   final Color seriesDeEmphasis;
   final Color seriesTrack;
   final Color good;
+
+  /// Fill only — on the light surface this sits below text contrast, so it never
+  /// carries wording, only a meter fill or an icon beside a label.
+  final Color warning;
+
   final Color critical;
   final Color successText;
 
@@ -140,6 +149,7 @@ class VizColors extends ThemeExtension<VizColors> {
     Color? seriesDeEmphasis,
     Color? seriesTrack,
     Color? good,
+    Color? warning,
     Color? critical,
     Color? successText,
   }) {
@@ -157,6 +167,7 @@ class VizColors extends ThemeExtension<VizColors> {
       seriesDeEmphasis: seriesDeEmphasis ?? this.seriesDeEmphasis,
       seriesTrack: seriesTrack ?? this.seriesTrack,
       good: good ?? this.good,
+      warning: warning ?? this.warning,
       critical: critical ?? this.critical,
       successText: successText ?? this.successText,
     );
@@ -180,6 +191,7 @@ class VizColors extends ThemeExtension<VizColors> {
       seriesDeEmphasis: mix(seriesDeEmphasis, other.seriesDeEmphasis),
       seriesTrack: mix(seriesTrack, other.seriesTrack),
       good: mix(good, other.good),
+      warning: mix(warning, other.warning),
       critical: mix(critical, other.critical),
       successText: mix(successText, other.successText),
     );
@@ -272,7 +284,9 @@ ThemeData buildAppTheme(Brightness brightness) {
       ),
     ),
     snackBarTheme: SnackBarThemeData(
-      backgroundColor: isDark ? AppColors.lightSurfaceAlt : AppColors.darkSurface,
+      backgroundColor: isDark
+          ? AppColors.lightSurfaceAlt
+          : AppColors.darkSurface,
       contentTextStyle: TextStyle(
         color: isDark ? AppColors.lightInk : AppColors.darkInk,
         fontSize: 14,

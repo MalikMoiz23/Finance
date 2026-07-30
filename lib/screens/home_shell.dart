@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../core/app_theme.dart';
 import '../widgets/entrance.dart';
+import 'budgets_screen.dart';
 import 'dashboard_screen.dart';
 import 'expense_editor_sheet.dart';
 import 'expenses_screen.dart';
@@ -19,11 +20,30 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
+  final PageController _pages = PageController();
   int _index = 0;
+
+  @override
+  void dispose() {
+    _pages.dispose();
+    super.dispose();
+  }
 
   void _open(int index) {
     if (index == _index) return;
+    HapticFeedback.selectionClick();
     setState(() => _index = index);
+    // A short slide between tabs reads as one surface moving, rather than
+    // content being swapped underneath you.
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _pages.jumpToPage(index);
+    } else {
+      _pages.animateToPage(
+        index,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      );
+    }
   }
 
   @override
@@ -43,12 +63,18 @@ class _HomeShellState extends State<HomeShell> {
       child: Scaffold(
         body: SafeArea(
           bottom: false,
-          child: IndexedStack(
-            index: _index,
+          child: PageView(
+            controller: _pages,
+            // Tabs are changed from the bar, not by swiping — a horizontal drag
+            // inside a chart or a filter row should not change tab.
+            physics: const NeverScrollableScrollPhysics(),
             children: [
-              ScreenIntro(child: DashboardScreen(onOpenTab: _open)),
-              const ScreenIntro(child: InsightsScreen()),
-              const ExpensesScreen(),
+              _Keep(
+                child: ScreenIntro(child: DashboardScreen(onOpenTab: _open)),
+              ),
+              const _Keep(child: ScreenIntro(child: InsightsScreen())),
+              const _Keep(child: ExpensesScreen()),
+              const _Keep(child: ScreenIntro(child: BudgetsScreen())),
             ],
           ),
         ),
@@ -69,6 +95,27 @@ class _HomeShellState extends State<HomeShell> {
   }
 }
 
+/// Keeps a tab's state (scroll offset, search text) while another tab is shown.
+class _Keep extends StatefulWidget {
+  const _Keep({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_Keep> createState() => _KeepState();
+}
+
+class _KeepState extends State<_Keep> with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return widget.child;
+  }
+}
+
 class _BottomBar extends StatelessWidget {
   const _BottomBar({required this.index, required this.onChanged});
 
@@ -79,6 +126,7 @@ class _BottomBar extends StatelessWidget {
     (icon: Icons.pie_chart_rounded, label: 'Overview'),
     (icon: Icons.insights_rounded, label: 'Insights'),
     (icon: Icons.receipt_long_rounded, label: 'Expenses'),
+    (icon: Icons.savings_rounded, label: 'Budgets'),
   ];
 
   @override
@@ -92,7 +140,7 @@ class _BottomBar extends StatelessWidget {
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
           child: Row(
             children: [
               for (var i = 0; i < _items.length; i++)
@@ -105,8 +153,6 @@ class _BottomBar extends StatelessWidget {
                     onTap: () => onChanged(i),
                   ),
                 ),
-              // Keeps the row clear of the floating action button.
-              const SizedBox(width: 64),
             ],
           ),
         ),
@@ -138,7 +184,8 @@ class _NavItem extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(14),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
         padding: const EdgeInsets.symmetric(vertical: 8),
         decoration: BoxDecoration(
           color: selected
@@ -149,15 +196,23 @@ class _NavItem extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 21, color: color),
+            // The icon lifts slightly when its tab is active.
+            AnimatedSlide(
+              offset: Offset(0, selected ? -0.06 : 0),
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOut,
+              child: Icon(icon, size: 21, color: color),
+            ),
             const SizedBox(height: 3),
             Text(
               label,
               maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: context.text.labelSmall?.copyWith(
                 color: color,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                letterSpacing: 0.1,
+                letterSpacing: 0,
+                fontSize: 10.5,
               ),
             ),
           ],
