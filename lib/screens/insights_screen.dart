@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../core/app_theme.dart';
 import '../core/formatters.dart';
 import '../models/analytics.dart';
+import '../models/expense.dart';
 import '../models/item_catalog.dart';
 import '../state/expense_store.dart';
 import '../widgets/category_breakdown.dart';
@@ -14,6 +15,7 @@ import '../widgets/entrance.dart';
 import '../widgets/expense_tile.dart';
 import '../widgets/period_filter_bar.dart';
 import '../widgets/section_card.dart';
+import '../widgets/spend_calendar.dart';
 import '../widgets/stat_tile.dart';
 import '../widgets/trend_bar_chart.dart';
 import 'expense_editor_sheet.dart';
@@ -154,10 +156,12 @@ class InsightsScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: AppSizes.gap),
-            Entrance(index: 5, child: _TopItemsCard(summary: summary)),
+            const Entrance(index: 5, child: _CalendarCard()),
+            const SizedBox(height: AppSizes.gap),
+            Entrance(index: 6, child: _TopItemsCard(summary: summary)),
             const SizedBox(height: AppSizes.gap),
             Entrance(
-              index: 6,
+              index: 7,
               child: SectionCard(
                 title: 'Biggest single spends',
                 subtitle: 'Top ${summary.biggest.length} of ${summary.count}',
@@ -175,6 +179,132 @@ class InsightsScreen extends StatelessWidget {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A month at a glance, and a way into a single day. Tapping a cell reveals
+/// that day's total and its entries, so a spike is one tap from an explanation.
+class _CalendarCard extends StatefulWidget {
+  const _CalendarCard();
+
+  @override
+  State<_CalendarCard> createState() => _CalendarCardState();
+}
+
+class _CalendarCardState extends State<_CalendarCard> {
+  DateTime? _selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    final store = context.watch<ExpenseStore>();
+    final month = store.calendarMonth;
+    final totals = store.dailyTotals(month);
+    final selected = _selected;
+
+    // A month change (period stepping) must not leave a stale day selected.
+    if (selected != null &&
+        (selected.year != month.year || selected.month != month.month)) {
+      _selected = null;
+    }
+
+    final dayExpenses = selected == null
+        ? const <Expense>[]
+        : store.expensesOn(selected);
+    final dayTotal = dayExpenses.fold<double>(0, (s, e) => s + e.amount);
+    final activeDays = totals.values.where((v) => v > 0).length;
+
+    return SectionCard(
+      title: 'Spending calendar',
+      subtitle: Dates.monthYear(month),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SpendCalendar(
+            month: month,
+            dailyTotals: totals,
+            selected: selected,
+            onSelect: (day) => setState(() => _selected = day),
+          ),
+          const SizedBox(height: 14),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOut,
+            alignment: Alignment.topCenter,
+            child: selected == null
+                ? Row(
+                    children: [
+                      Icon(
+                        Icons.touch_app_outlined,
+                        size: 15,
+                        color: viz.inkMuted,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          activeDays == 0
+                              ? 'No spending logged this month yet.'
+                              : 'Spent on $activeDays '
+                                    '${activeDays == 1 ? 'day' : 'days'} — tap a '
+                                    'day to see what it was.',
+                          style: context.text.bodySmall?.copyWith(
+                            color: viz.inkMuted,
+                          ),
+                        ),
+                      ),
+                    ],
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: viz.surfaceAlt,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                Dates.weekdayDayMonth(selected),
+                                style: context.text.titleSmall?.copyWith(
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              dayExpenses.isEmpty
+                                  ? 'Nothing spent'
+                                  : '${Money.format(dayTotal)} · '
+                                        '${dayExpenses.length} '
+                                        '${dayExpenses.length == 1 ? 'entry' : 'entries'}',
+                              style: context.text.bodySmall?.copyWith(
+                                color: viz.inkSecondary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      for (final expense in dayExpenses)
+                        ExpenseTile(
+                          expense: expense,
+                          showDate: false,
+                          onTap: () => ExpenseEditorSheet.show(
+                            context,
+                            existing: expense,
+                          ),
+                        ),
+                    ],
+                  ),
+          ),
         ],
       ),
     );

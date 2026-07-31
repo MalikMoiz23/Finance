@@ -105,9 +105,33 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
     if (picked != null) setState(() => _date = dayOnly(picked));
   }
 
+  /// Bumps the amount by a round number — quicker than typing when you already
+  /// know roughly what it cost.
+  void _bump(int by) {
+    final current =
+        double.tryParse(_amount.text.replaceAll(',', '').trim()) ?? 0;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _amount.text = _trimAmount(current + by);
+      _error = null;
+    });
+  }
+
+  /// Clears the amount, item and note but keeps the category and date, so a run
+  /// of entries from the same shopping trip is quick.
+  void _resetForNext() {
+    setState(() {
+      _amount.clear();
+      _item.clear();
+      _note.clear();
+      _error = null;
+      _suggestionsOpen = false;
+    });
+  }
+
   /// Writes straight to Supabase. On failure the sheet stays open with the
   /// message, so nothing the user typed is lost.
-  Future<void> _save() async {
+  Future<void> _save({bool keepOpen = false}) async {
     final raw = _amount.text.replaceAll(',', '').trim();
     final parsed = double.tryParse(raw);
     if (parsed == null || parsed <= 0) {
@@ -147,12 +171,18 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
       }
       // Never save an entry out of sight: pull the window onto its date.
       store.focusOn(_date);
-      navigator.pop();
       final what = _item.text.trim().isEmpty
           ? _category.label
           : _item.text.trim();
+      if (keepOpen && mounted) {
+        _resetForNext();
+        setState(() => _saving = false);
+      } else {
+        navigator.pop();
+      }
       messenger.showSnackBar(
         SnackBar(
+          duration: const Duration(seconds: 2),
           content: Text(
             '${existing == null ? 'Added' : 'Updated'} '
             '${Money.format(parsed)} · $what',
@@ -325,6 +355,28 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
               ),
             ],
 
+            // ------------------------------------------------ amount bumps ---
+            const SizedBox(height: 12),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  for (final step in const [50, 100, 200, 500, 1000]) ...[
+                    _BumpChip(step: step, onTap: () => _bump(step)),
+                    const SizedBox(width: 8),
+                  ],
+                  if (_amount.text.isNotEmpty)
+                    _BumpChip(
+                      label: 'Clear',
+                      onTap: () => setState(() {
+                        _amount.clear();
+                        _error = null;
+                      }),
+                    ),
+                ],
+              ),
+            ),
+
             // --------------------------------------------------- quick add ---
             if (quickAdd.isNotEmpty) ...[
               const SizedBox(height: 16),
@@ -493,7 +545,65 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
                       ),
               ),
             ),
+            // Entering a whole shopping trip: save and stay, keeping the
+            // category and date for the next line.
+            if (!_isEditing) ...[
+              const SizedBox(height: 10),
+              SizedBox(
+                height: 48,
+                child: OutlinedButton.icon(
+                  onPressed: _saving ? null : () => _save(keepOpen: true),
+                  icon: const Icon(Icons.playlist_add_rounded, size: 19),
+                  label: const Text('Save & add another'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: viz.series,
+                    side: BorderSide(color: viz.hairline),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    textStyle: context.text.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Adds a round number to the amount — faster than the keyboard for the common
+/// "it was about five hundred" case.
+class _BumpChip extends StatelessWidget {
+  const _BumpChip({this.step, this.label, required this.onTap});
+
+  final int? step;
+  final String? label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    final isClear = step == null;
+    return Pressable(
+      onTap: onTap,
+      scale: 0.94,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 8),
+        decoration: BoxDecoration(
+          color: viz.surfaceAlt,
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(color: viz.hairline),
+        ),
+        child: Text(
+          label ?? '+$step',
+          style: context.text.labelLarge?.copyWith(
+            color: isClear ? viz.inkMuted : viz.inkSecondary,
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ),
     );

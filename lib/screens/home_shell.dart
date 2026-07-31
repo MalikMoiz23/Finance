@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 
 import '../core/app_theme.dart';
+import '../core/error_messages.dart';
+import '../core/formatters.dart';
+import '../state/expense_store.dart';
 import '../widgets/entrance.dart';
 import 'budgets_screen.dart';
 import 'dashboard_screen.dart';
@@ -46,6 +50,32 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  /// Logs the most recent expense again, dated today.
+  Future<void> _repeatLast() async {
+    final store = context.read<ExpenseStore>();
+    final messenger = ScaffoldMessenger.of(context);
+    final last = store.mostRecent;
+    if (last == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Nothing to repeat yet — add one first')),
+      );
+      return;
+    }
+    HapticFeedback.mediumImpact();
+    try {
+      await store.duplicate(last);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            'Added ${Money.format(last.amount)} · ${last.title} again',
+          ),
+        ),
+      );
+    } catch (error) {
+      messenger.showSnackBar(SnackBar(content: Text(describeError(error))));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final viz = context.viz;
@@ -78,16 +108,21 @@ class _HomeShellState extends State<HomeShell> {
             ],
           ),
         ),
-        floatingActionButton: FloatingActionButton(
-          onPressed: () => ExpenseEditorSheet.show(context),
-          backgroundColor: viz.series,
-          foregroundColor: Colors.white,
-          elevation: 3,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
+        // Long-press repeats the last expense outright — for the things bought
+        // every day, that is the whole entry in one gesture.
+        floatingActionButton: GestureDetector(
+          onLongPress: _repeatLast,
+          child: FloatingActionButton(
+            onPressed: () => ExpenseEditorSheet.show(context),
+            backgroundColor: viz.series,
+            foregroundColor: Colors.white,
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+            ),
+            tooltip: 'Add expense · hold to repeat the last one',
+            child: const Icon(Icons.add_rounded, size: 28),
           ),
-          tooltip: 'Add expense',
-          child: const Icon(Icons.add_rounded, size: 28),
         ),
         bottomNavigationBar: _BottomBar(index: _index, onChanged: _open),
       ),

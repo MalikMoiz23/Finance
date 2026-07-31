@@ -81,6 +81,33 @@ class ExpenseStore extends ChangeNotifier {
 
   String get budgetMonthLabel => Dates.monthYear(budgetMonth.start);
 
+  /// Which month the calendar shows: the one containing today when the selected
+  /// period includes it, otherwise the month the period starts in. (Anchoring
+  /// straight on the anchor would show January whenever the period is a year.)
+  DateTime get calendarMonth {
+    final now = DateTime.now();
+    final range = Periods.rangeOf(_period, _anchor);
+    final reference = range.contains(now) ? now : range.start;
+    return DateTime(reference.year, reference.month);
+  }
+
+  /// Total per day for [month], keyed by midnight — the calendar heatmap.
+  Map<DateTime, double> dailyTotals(DateTime month) {
+    final totals = <DateTime, double>{};
+    for (final expense in _expenses) {
+      if (expense.date.year == month.year &&
+          expense.date.month == month.month) {
+        totals[expense.date] = (totals[expense.date] ?? 0) + expense.amount;
+      }
+    }
+    return totals;
+  }
+
+  List<Expense> expensesOn(DateTime day) {
+    final target = dayOnly(day);
+    return _expenses.where((e) => e.date == target).toList();
+  }
+
   double spentThisMonth(ExpenseCategory category) => _expenses
       .where((e) => e.category == category && budgetMonth.contains(e.date))
       .fold<double>(0, (sum, e) => sum + e.amount);
@@ -306,6 +333,27 @@ class ExpenseStore extends ChangeNotifier {
     _refresh();
     await _persistCache();
   }
+
+  /// The most recent entry, whatever period is on screen.
+  Expense? get mostRecent => _expenses.firstOrNull;
+
+  /// Logs the same thing again, dated today — the fastest possible entry for
+  /// something bought repeatedly. Returns null when there is nothing to repeat.
+  Future<Expense?> repeatMostRecent() async {
+    final last = mostRecent;
+    if (last == null) return null;
+    await duplicate(last);
+    return last;
+  }
+
+  /// Copies an existing expense onto today.
+  Future<void> duplicate(Expense expense) => create(
+    amount: expense.amount,
+    category: expense.category,
+    date: dayOnly(DateTime.now()),
+    item: expense.item,
+    note: expense.note,
+  );
 
   /// Undo for a deleted expense: the row is gone, so this writes it back as a
   /// new row with the same values.

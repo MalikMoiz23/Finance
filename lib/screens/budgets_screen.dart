@@ -177,7 +177,9 @@ class _OverallCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  '${store.daysLeftThisMonth} days left in ${store.budgetMonthLabel}',
+                  '${store.daysLeftThisMonth} '
+                  '${store.daysLeftThisMonth == 1 ? 'day' : 'days'} left in '
+                  '${store.budgetMonthLabel}',
                   style: context.text.labelSmall?.copyWith(color: viz.inkMuted),
                 ),
               ],

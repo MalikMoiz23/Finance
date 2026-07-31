@@ -111,10 +111,27 @@ class BudgetRow extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 8),
-                    _Meter(
-                      fraction: status.meterFraction,
-                      fill: style.fill,
-                      track: style.track,
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _Meter(
+                            fraction: status.meterFraction,
+                            fill: style.fill,
+                            track: style.track,
+                          ),
+                        ),
+                        // Safe daily spend sits beside the meter, where there is
+                        // room, instead of crowding the status line.
+                        if (!over && status.daysLeft > 0) ...[
+                          const SizedBox(width: 10),
+                          Text(
+                            '${Money.compact(status.dailyAllowance)}/day',
+                            style: context.text.labelSmall?.copyWith(
+                              color: viz.inkMuted,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ],
                 ),
@@ -144,17 +161,6 @@ class BudgetRow extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (!over && status.daysLeft > 0)
-                  Flexible(
-                    child: Text(
-                      '${Money.compact(status.dailyAllowance)}/day',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: context.text.labelSmall?.copyWith(
-                        color: viz.inkMuted,
-                      ),
-                    ),
-                  ),
               ],
             ),
           ),

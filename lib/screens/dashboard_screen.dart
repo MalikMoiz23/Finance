@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../core/app_theme.dart';
+import '../core/csv_export.dart';
 import '../core/error_messages.dart';
 import '../core/formatters.dart';
 import '../models/period.dart';
@@ -242,7 +244,8 @@ class _BudgetSummary extends StatelessWidget {
     return SectionCard(
       title: 'Budgets',
       subtitle:
-          '${store.budgetMonthLabel} · ${store.daysLeftThisMonth} days left',
+          '${store.budgetMonthLabel} · ${store.daysLeftThisMonth} '
+          '${store.daysLeftThisMonth == 1 ? 'day' : 'days'} left',
       trailing: CardAction(label: 'All', onTap: () => onOpenTab(3)),
       child: Column(
         children: [
@@ -383,6 +386,28 @@ class _DashboardHeader extends StatelessWidget {
     }
   }
 
+  /// Puts every expense on the clipboard as CSV — paste straight into Excel or
+  /// Google Sheets. Copying avoids a file-picker dependency and works on web.
+  Future<void> _copyCsv(BuildContext context) async {
+    final store = context.read<ExpenseStore>();
+    final messenger = ScaffoldMessenger.of(context);
+    final rows = store.allExpenses;
+    if (rows.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Nothing to export yet')),
+      );
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: expensesToCsv(rows)));
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          '${rows.length} expenses copied — paste into a spreadsheet',
+        ),
+      ),
+    );
+  }
+
   Future<void> _confirmSignOut(BuildContext context) async {
     final auth = context.read<AuthController>();
     final confirmed = await showDialog<bool>(
@@ -469,6 +494,7 @@ class _DashboardHeader extends StatelessWidget {
               side: BorderSide(color: viz.hairline),
             ),
             onSelected: (value) => switch (value) {
+              'export' => _copyCsv(context),
               'clear' => _confirmClear(context),
               'signout' => _confirmSignOut(context),
               _ => null,
@@ -499,6 +525,20 @@ class _DashboardHeader extends StatelessWidget {
                   ),
                 ),
               const PopupMenuDivider(),
+              PopupMenuItem<String>(
+                value: 'export',
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.table_view_rounded,
+                      size: 19,
+                      color: viz.inkSecondary,
+                    ),
+                    const SizedBox(width: 10),
+                    const Flexible(child: Text('Copy as spreadsheet')),
+                  ],
+                ),
+              ),
               PopupMenuItem<String>(
                 value: 'clear',
                 child: Row(

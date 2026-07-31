@@ -1,6 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The app talks to Supabase over HTTPS. Flutter's template only declares
+         this in the debug and profile manifests, so without it here a release
+         build has no network access at all: every request fails and the app
+         reports "no internet". It is a normal permission, granted at install
+         time, so the user is never prompted for it. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
     <application
-        android:label="finance"
+        android:label="Finance"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

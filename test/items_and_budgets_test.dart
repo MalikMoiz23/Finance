@@ -1,3 +1,4 @@
+import 'package:finance/core/csv_export.dart';
 import 'package:finance/models/budget.dart';
 import 'package:finance/models/expense.dart';
 import 'package:finance/models/expense_category.dart';
@@ -87,6 +88,46 @@ void main() {
         ),
       ];
       expect(ItemCatalog.topItems(withBlank).length, 3);
+    });
+  });
+
+  group('csv export', () {
+    test('has a header and one row per expense, newest first as given', () {
+      final csv = expensesToCsv([
+        e('Chicken', 950, ExpenseCategory.groceries),
+        e('Petrol', 2500, ExpenseCategory.fuel, daysAgo: 1),
+      ]);
+      final lines = csv.split('\n');
+      expect(lines.first, 'Date,Item,Category,Amount,Note');
+      expect(lines[1], '2026-07-30,Chicken,Groceries,950.00,');
+      expect(lines[2], '2026-07-29,Petrol,Fuel & Transport,2500.00,');
+      expect(lines.length, 3);
+    });
+
+    test('amounts stay unformatted so a spreadsheet reads them as numbers', () {
+      final csv = expensesToCsv([e('Milk', 249.5, ExpenseCategory.groceries)]);
+      expect(csv, contains(',249.50,'));
+      expect(csv, isNot(contains('Rs')));
+    });
+
+    test('a comma or quote in a note cannot break the row', () {
+      final expense = Expense(
+        id: 'x',
+        amount: 100,
+        category: ExpenseCategory.other,
+        date: DateTime(2026, 7, 30),
+        item: 'Gift',
+        note: 'for Ali, said "thanks"',
+      );
+      final row = expensesToCsv([expense]).split('\n')[1];
+      expect(row, endsWith('"for Ali, said ""thanks"""'));
+      // Five fields: the quoted note keeps its comma out of the split.
+      expect(row.split(',').length, greaterThan(5));
+      expect(row.startsWith('2026-07-30,Gift,Other,100.00,"'), isTrue);
+    });
+
+    test('an empty list still produces a usable header', () {
+      expect(expensesToCsv(const []), 'Date,Item,Category,Amount,Note');
     });
   });
 

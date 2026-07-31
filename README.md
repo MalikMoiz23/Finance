@@ -41,9 +41,22 @@ expenses** deletes every row in the signed-in account.
 
 | Tab | What it does |
 |---|---|
-| **Overview** | Period filter, total spent + change vs the previous period, spend-over-time bars, top 5 categories, recent expenses |
-| **Insights** | Stat tiles (total, per day, biggest category, priciest weekday), full category ranking with per-category change, spending by weekday, biggest single spends |
-| **Expenses** | Every expense in the period, grouped by day with day totals; search, filter by category, tap to edit, swipe to delete with undo |
+| **Overview** | Period filter, total spent + change vs the previous period, budget ring and the two categories closest to their limit, spend-over-time bars, top 5 categories, recent expenses |
+| **Insights** | Stat tiles (total, per day, biggest category, priciest weekday), category ranking with per-category change, spending by weekday, a **month calendar heatmap** with tap-to-inspect, most-bought items, biggest single spends |
+| **Expenses** | Every expense grouped by day with day totals; search items/notes/categories/amounts, **all-time or this-period**, sort by newest or biggest, filter by category, tap to edit, swipe left to delete (with undo), swipe right to log it again today |
+| **Budgets** | A monthly limit per category with presets; meters that band at 80% and 100% (*On track → Close to limit → Over budget*), what's left, and a safe amount per remaining day |
+
+## Adding expenses fast
+
+Daily entry is meant to take seconds:
+
+- **Item autocomplete** — type `chick` and it offers *Chicken* from your own history, with its category and the last price you paid. New accounts get the same completions from a built-in catalogue of ~90 household items.
+- **Buy again chips** — one tap fills item, category and price.
+- **Amount bumps** — `+50 +100 +200 +500 +1000` instead of typing.
+- **Save & add another** — keeps the sheet open with the category and date, for a whole shopping trip.
+- **Hold the + button** — logs your most recent expense again, dated today.
+- **Swipe a row right** — the same, from the list.
+- **Copy as spreadsheet** — ⋯ menu puts every expense on the clipboard as CSV.
 
 A single filter row (Week/Month/Year + ‹ › stepping) scopes **everything** below
 it, so no two cards can disagree about the numbers.

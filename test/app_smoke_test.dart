@@ -1,4 +1,5 @@
 import 'package:finance/app.dart';
+import 'package:finance/core/formatters.dart';
 import 'package:finance/data/local_prefs.dart';
 import 'package:finance/models/budget.dart';
 import 'package:finance/models/expense.dart';
@@ -101,7 +102,7 @@ Future<void> _addExpenseThroughUi(
   String? item,
   String? note,
 }) async {
-  await tester.tap(find.byTooltip('Add expense'));
+  await tester.tap(find.byType(FloatingActionButton));
   await tester.pumpAndSettle();
   await tester.enterText(find.byType(TextField).first, amount);
   if (item != null) {
@@ -373,7 +374,10 @@ void main() {
 
     await tester.tap(_tab(2));
     await tester.pumpAndSettle();
-    expect(find.text('Search notes, categories, amounts'), findsOneWidget);
+    expect(
+      find.text('Search items, notes, categories, amounts'),
+      findsOneWidget,
+    );
     expect(find.textContaining('3 of 3 in this month'), findsOneWidget);
 
     await tester.enterText(find.byType(TextField).first, 'zzz-no-match');
@@ -413,7 +417,10 @@ void main() {
     expect(find.bySemanticsLabel('Account and data'), findsOneWidget);
     // The floating button carries a tooltip instead, which is a separate
     // semantics field — hence the different finder.
-    expect(find.byTooltip('Add expense'), findsOneWidget);
+    expect(
+      find.byTooltip('Add expense · hold to repeat the last one'),
+      findsOneWidget,
+    );
 
     handle.dispose();
   });
@@ -429,7 +436,7 @@ void main() {
     expect(app.api.rowsFor(userId).single.item, 'Chicken');
 
     // Second entry: the item comes back as a one-tap chip carrying its price.
-    await tester.tap(find.byTooltip('Add expense'));
+    await tester.tap(find.byType(FloatingActionButton));
     await tester.pumpAndSettle();
     expect(find.text('Buy again'.toUpperCase()), findsOneWidget);
     await tester.tap(find.text('Chicken'));
@@ -479,6 +486,92 @@ void main() {
     expect(status.band, BudgetBand.overBudget);
     expect(find.textContaining('Over budget'), findsWidgets);
     expect(find.textContaining('1 category is over budget'), findsOneWidget);
+  });
+
+  testWidgets('swiping a row right logs the same thing again today', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+    app.api.seed(userId, _sampleExpenses(DateTime.now()));
+    await app.store.refresh();
+    await tester.pumpAndSettle();
+
+    await tester.tap(_tab(2));
+    await tester.pumpAndSettle();
+    // Petrol was yesterday; swiping right re-logs it on today.
+    await tester.drag(find.text('Petrol'), const Offset(500, 0));
+    await tester.pumpAndSettle();
+
+    final petrols = app.api
+        .rowsFor(userId)
+        .where((r) => r.note == 'Petrol')
+        .toList();
+    expect(petrols.length, 2, reason: 'original kept, copy added');
+    expect(petrols.where((r) => r.date == dayOnly(DateTime.now())).length, 1);
+    expect(find.textContaining('again'), findsWidgets);
+  });
+
+  testWidgets('Save & add another keeps the sheet open for the next entry', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+
+    await tester.tap(find.byType(FloatingActionButton));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).first, '300');
+    await tester.pumpAndSettle();
+
+    final again = find.widgetWithText(OutlinedButton, 'Save & add another');
+    await tester.ensureVisible(again);
+    await tester.pumpAndSettle();
+    await tester.tap(again);
+    await tester.pumpAndSettle();
+
+    // Saved, and the sheet is still up with a cleared amount.
+    expect(app.store.totalEntryCount, 1);
+    expect(
+      find.widgetWithText(OutlinedButton, 'Save & add another'),
+      findsOneWidget,
+    );
+
+    await tester.enterText(find.byType(TextField).first, '700');
+    await tester.pumpAndSettle();
+    final save = find.widgetWithText(FilledButton, 'Add expense');
+    await tester.ensureVisible(save);
+    await tester.pumpAndSettle();
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+
+    expect(app.store.totalEntryCount, 2);
+    expect(app.store.summary.total, 1000);
+  });
+
+  testWidgets('the calendar shows a day and opens its entries', (tester) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final now = DateTime.now();
+    app.api.seed(app.auth.currentUser!.id, _sampleExpenses(now));
+    await app.store.refresh();
+    await tester.pumpAndSettle();
+
+    await tester.tap(_tab(1));
+    await tester.pumpAndSettle();
+    await _revealText(tester, 'Spending calendar');
+
+    // Every day is a labelled target; today's carries its total.
+    final handle = tester.ensureSemantics();
+    expect(
+      find.bySemanticsLabel(RegExp('^Day ${now.day}, Rs ')),
+      findsOneWidget,
+    );
+    handle.dispose();
+
+    await tester.tap(find.text('${now.day}').last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('entr'), findsWidgets);
   });
 
   testWidgets('dark theme renders every screen', (tester) async {
