@@ -12,6 +12,7 @@ class DeltaBadge extends StatelessWidget {
     required this.comparedTo,
     this.onSurfaceColor,
     this.dense = false,
+    this.higherIsBetter = false,
   });
 
   /// Signed percentage change, or null when there is no baseline.
@@ -24,6 +25,9 @@ class DeltaBadge extends StatelessWidget {
   final Color? onSurfaceColor;
 
   final bool dense;
+
+  /// Spending up is bad (the default); savings up is good.
+  final bool higherIsBetter;
 
   @override
   Widget build(BuildContext context) {
@@ -48,13 +52,14 @@ class DeltaBadge extends StatelessWidget {
     final increased = rounded > 0;
     final flat = rounded == 0;
 
+    final good = higherIsBetter ? increased : !increased;
     final tone = onCard
         ? Colors.white
         : flat
         ? viz.inkSecondary
-        : increased
-        ? viz.critical
-        : viz.successText;
+        : good
+        ? viz.successText
+        : viz.critical;
 
     final icon = flat
         ? Icons.remove_rounded

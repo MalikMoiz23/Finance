@@ -3,8 +3,10 @@ import 'dart:async';
 import 'package:finance/data/auth_gateway.dart';
 import 'package:finance/data/budget_api.dart';
 import 'package:finance/data/expense_api.dart';
+import 'package:finance/data/income_api.dart';
 import 'package:finance/models/app_user.dart';
 import 'package:finance/models/budget.dart';
+import 'package:finance/models/income.dart';
 import 'package:finance/models/expense.dart';
 import 'package:finance/models/expense_category.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show AuthException;
@@ -230,5 +232,72 @@ class FakeBudgetApi implements BudgetApi {
   Future<void> remove(ExpenseCategory category) async {
     _guard(write: true);
     (_rows[_userId] ?? []).removeWhere((b) => b.category == category);
+  }
+}
+
+/// Monthly pay per user id, matching how row level security scopes it.
+class FakeIncomeApi implements IncomeApi {
+  FakeIncomeApi(this._auth);
+
+  final FakeAuthGateway _auth;
+  final Map<String, List<MonthlyIncome>> _rows = {};
+  int _nextId = 1;
+
+  bool offline = false;
+  bool failNextWrite = false;
+
+  String get _userId {
+    final id = _auth.currentUser?.id;
+    if (id == null) throw StateError('Not signed in');
+    return id;
+  }
+
+  List<MonthlyIncome> rowsFor(String userId) =>
+      List.unmodifiable(_rows[userId] ?? []);
+
+  void seed(String userId, List<MonthlyIncome> incomes) {
+    _rows.putIfAbsent(userId, () => []).addAll(incomes);
+  }
+
+  void _guard({bool write = false}) {
+    if (offline) throw Exception('ClientException: Failed host lookup');
+    if (write && failNextWrite) {
+      failNextWrite = false;
+      throw Exception('ClientException: connection closed');
+    }
+  }
+
+  static DateTime _monthOf(DateTime d) => DateTime(d.year, d.month);
+
+  @override
+  Future<List<MonthlyIncome>> fetchAll() async {
+    _guard();
+    return [...?_rows[_userId]]..sort((a, b) => a.month.compareTo(b.month));
+  }
+
+  @override
+  Future<MonthlyIncome> save(DateTime month, double amount) async {
+    _guard(write: true);
+    final key = _monthOf(month);
+    final rows = _rows.putIfAbsent(_userId, () => []);
+    final index = rows.indexWhere((i) => i.month == key);
+    final saved = MonthlyIncome(
+      id: index == -1 ? 'income-${_nextId++}' : rows[index].id,
+      month: key,
+      amount: amount,
+    );
+    if (index == -1) {
+      rows.add(saved);
+    } else {
+      rows[index] = saved;
+    }
+    return saved;
+  }
+
+  @override
+  Future<void> remove(DateTime month) async {
+    _guard(write: true);
+    final key = _monthOf(month);
+    (_rows[_userId] ?? []).removeWhere((i) => i.month == key);
   }
 }

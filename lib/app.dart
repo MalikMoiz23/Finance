@@ -14,7 +14,7 @@ class FinanceApp extends StatelessWidget {
     final themeMode = context.watch<ThemeController>().mode;
 
     return MaterialApp(
-      title: 'Finance',
+      title: 'FinTrack',
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(Brightness.light),
       darkTheme: buildAppTheme(Brightness.dark),
@@ -32,7 +32,7 @@ class SetupApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Finance — setup',
+      title: 'FinTrack — setup',
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(Brightness.light),
       darkTheme: buildAppTheme(Brightness.dark),

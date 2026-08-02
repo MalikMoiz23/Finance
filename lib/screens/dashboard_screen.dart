@@ -17,12 +17,14 @@ import '../widgets/empty_state.dart';
 import '../widgets/entrance.dart';
 import '../widgets/expense_tile.dart';
 import '../widgets/hero_total_card.dart';
+import '../widgets/pay_card.dart';
 import '../widgets/period_filter_bar.dart';
 import '../widgets/pressable.dart';
 import '../widgets/section_card.dart';
 import '../widgets/skeleton.dart';
 import '../widgets/trend_bar_chart.dart';
 import 'expense_editor_sheet.dart';
+import 'income_sheet.dart';
 import 'home_shell.dart';
 
 class DashboardScreen extends StatelessWidget {
@@ -74,11 +76,19 @@ class DashboardScreen extends StatelessWidget {
           const SizedBox(height: AppSizes.gap),
           Entrance(
             index: 2,
-            child: _BudgetSummary(store: store, onOpenTab: onOpenTab),
+            child: PayCard(
+              comparison: store.thisMonthVsLast,
+              onEdit: () => IncomeSheet.show(context),
+            ),
           ),
           const SizedBox(height: AppSizes.gap),
           Entrance(
             index: 3,
+            child: _BudgetSummary(store: store, onOpenTab: onOpenTab),
+          ),
+          const SizedBox(height: AppSizes.gap),
+          Entrance(
+            index: 4,
             child: SectionCard(
               title: trendTitle,
               subtitle: summary.isEmpty ? null : 'Tap a bar to read its total',
@@ -96,7 +106,7 @@ class DashboardScreen extends StatelessWidget {
           ),
           const SizedBox(height: AppSizes.gap),
           Entrance(
-            index: 4,
+            index: 5,
             child: SectionCard(
               title: 'Where it went',
               subtitle: summary.isEmpty
@@ -120,7 +130,7 @@ class DashboardScreen extends StatelessWidget {
           ),
           const SizedBox(height: AppSizes.gap),
           Entrance(
-            index: 5,
+            index: 6,
             child: SectionCard(
               title: 'Recent expenses',
               trailing: CardAction(label: 'See all', onTap: () => onOpenTab(2)),

@@ -52,11 +52,31 @@ create table if not exists public.budgets (
   unique (user_id, category)
 );
 
+-- ----------------------------------------------------------- monthly pay ---
+-- What was earned in a given month. One row per month, so a raise changes
+-- future months without rewriting the savings history of past ones. A month
+-- with no row inherits the most recent earlier month's figure (done in the app).
+create table if not exists public.monthly_income (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid()
+               references auth.users (id) on delete cascade,
+  -- Always the first of the month.
+  month      date not null,
+  amount     numeric(12, 2) not null check (amount >= 0),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, month)
+);
+
+create index if not exists monthly_income_user_month_idx
+  on public.monthly_income (user_id, month desc);
+
 -- --------------------------------------------------------------------- RLS ---
 -- Row level security is the only thing separating accounts: the key shipped in
 -- the app is public, so every policy pins rows to auth.uid().
-alter table public.expenses enable row level security;
-alter table public.budgets  enable row level security;
+alter table public.expenses       enable row level security;
+alter table public.budgets        enable row level security;
+alter table public.monthly_income enable row level security;
 
 drop policy if exists expenses_select_own on public.expenses;
 create policy expenses_select_own on public.expenses for select
@@ -92,6 +112,24 @@ drop policy if exists budgets_delete_own on public.budgets;
 create policy budgets_delete_own on public.budgets for delete
   to authenticated using (auth.uid() = user_id);
 
+drop policy if exists income_select_own on public.monthly_income;
+create policy income_select_own on public.monthly_income for select
+  to authenticated using (auth.uid() = user_id);
+
+drop policy if exists income_insert_own on public.monthly_income;
+create policy income_insert_own on public.monthly_income for insert
+  to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists income_update_own on public.monthly_income;
+create policy income_update_own on public.monthly_income for update
+  to authenticated using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists income_delete_own on public.monthly_income;
+create policy income_delete_own on public.monthly_income for delete
+  to authenticated using (auth.uid() = user_id);
+
 -- Check after running (expects 4 policies per table):
 --   select tablename, cmd, policyname from pg_policies
---   where tablename in ('expenses', 'budgets') order by tablename, cmd;
+--   where tablename in ('expenses', 'budgets', 'monthly_income')
+--   order by tablename, cmd;

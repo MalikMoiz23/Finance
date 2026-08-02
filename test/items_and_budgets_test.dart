@@ -2,6 +2,7 @@ import 'package:finance/core/csv_export.dart';
 import 'package:finance/models/budget.dart';
 import 'package:finance/models/expense.dart';
 import 'package:finance/models/expense_category.dart';
+import 'package:finance/models/income.dart';
 import 'package:finance/models/item_catalog.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -88,6 +89,64 @@ void main() {
         ),
       ];
       expect(ItemCatalog.topItems(withBlank).length, 3);
+    });
+  });
+
+  group('pay and savings', () {
+    MonthMoney money(double? income, double spent) =>
+        MonthMoney(month: DateTime(2026, 7), income: income, spent: spent);
+
+    test('saved is pay minus spend, and the rate is its share', () {
+      final m = money(120000, 84000);
+      expect(m.saved, 36000);
+      expect(m.savingsRate, closeTo(0.3, 0.0001));
+      expect(m.spentFraction, closeTo(0.7, 0.0001));
+      expect(m.overspent, isFalse);
+    });
+
+    test('spending more than the pay reads as overspent', () {
+      final m = money(50000, 62000);
+      expect(m.saved, -12000);
+      expect(m.savingsRate, closeTo(-0.24, 0.0001));
+      expect(m.overspent, isTrue);
+      // The meter cannot run past its own track.
+      expect(m.spentFraction, 1);
+    });
+
+    test('without a pay figure there is nothing to divide by', () {
+      final m = money(null, 5000);
+      expect(m.hasIncome, isFalse);
+      expect(m.saved, isNull);
+      expect(m.savingsRate, isNull);
+      expect(m.spentFraction, 0);
+      expect(m.overspent, isFalse);
+    });
+
+    test('comparison reports both directions against last month', () {
+      final c = MonthComparison(
+        current: money(120000, 84000), // saved 36,000
+        previous: MonthMoney(
+          month: DateTime(2026, 6),
+          income: 120000,
+          spent: 90000, // saved 30,000
+        ),
+      );
+      // Spent less than last month, saved more.
+      expect(c.spentDelta, closeTo(-6.667, 0.01));
+      expect(c.savedDelta, closeTo(20, 0.01));
+      expect(c.savedDifference, 6000);
+      expect(c.spentDifference, -6000);
+      expect(c.incomeDelta, 0);
+    });
+
+    test('no baseline means no percentage rather than a wrong one', () {
+      final c = MonthComparison(
+        current: money(120000, 84000),
+        previous: money(null, 0),
+      );
+      expect(c.savedDelta, isNull);
+      expect(c.spentDelta, isNull, reason: 'last month spent nothing');
+      expect(c.incomeDelta, isNull);
     });
   });
 

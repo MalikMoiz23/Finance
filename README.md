@@ -1,6 +1,6 @@
-# Finance — home expense tracker
+# FinTrack — home expense tracker
 
-Flutter app for tracking household spending: log an expense, then read it back by
+Flutter app (**FinTrack**) for tracking household spending: log an expense, then read it back by
 **week / month / year** and see which categories the money went to.
 
 Currency is **PKR** (`Rs 1,250`, no decimals). Data lives in **Supabase**
@@ -45,6 +45,12 @@ expenses** deletes every row in the signed-in account.
 | **Insights** | Stat tiles (total, per day, biggest category, priciest weekday), category ranking with per-category change, spending by weekday, a **month calendar heatmap** with tap-to-inspect, most-bought items, biggest single spends |
 | **Expenses** | Every expense grouped by day with day totals; search items/notes/categories/amounts, **all-time or this-period**, sort by newest or biggest, filter by category, tap to edit, swipe left to delete (with undo), swipe right to log it again today |
 | **Budgets** | A monthly limit per category with presets; meters that band at 80% and 100% (*On track → Close to limit → Over budget*), what's left, and a safe amount per remaining day |
+
+## Pay and savings
+
+Set your monthly pay and the Overview tab shows what you actually keep: pay, spent, saved, the savings rate, and how both spending and savings compare with last month.
+
+Pay is stored **per month**, not as one global figure. A month with no entry inherits the most recent earlier one, so entering a raise applies from that month onward and never rewrites the savings history of the months before it. Spending more than you earned is shown as *overspent*, in words as well as colour.
 
 ## Adding expenses fast
 

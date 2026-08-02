@@ -7,6 +7,7 @@ import 'core/supabase_config.dart';
 import 'data/auth_gateway.dart';
 import 'data/budget_api.dart';
 import 'data/expense_api.dart';
+import 'data/income_api.dart';
 import 'data/local_prefs.dart';
 import 'state/auth_controller.dart';
 import 'state/expense_store.dart';
@@ -43,6 +44,7 @@ Future<void> main() async {
           create: (_) => ExpenseStore(
             api: SupabaseExpenseApi(client),
             budgetApi: SupabaseBudgetApi(client),
+            incomeApi: SupabaseIncomeApi(client),
             prefs: prefs,
           ),
         ),

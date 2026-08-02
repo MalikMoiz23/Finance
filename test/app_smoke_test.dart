@@ -18,11 +18,12 @@ import 'support/fakes.dart';
 /// Supabase auth and the expenses table. Any overflow, null or layout assertion
 /// in the widgets below fails these tests.
 class _Harness {
-  _Harness(this.auth, this.api, this.budgets, this.store);
+  _Harness(this.auth, this.api, this.budgets, this.incomes, this.store);
 
   final FakeAuthGateway auth;
   final FakeExpenseApi api;
   final FakeBudgetApi budgets;
+  final FakeIncomeApi incomes;
   final ExpenseStore store;
 }
 
@@ -38,8 +39,14 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
   addTearDown(authGateway.dispose);
   final api = FakeExpenseApi(authGateway);
   final budgets = FakeBudgetApi(authGateway);
+  final incomes = FakeIncomeApi(authGateway);
   final prefs = LocalPrefs();
-  final store = ExpenseStore(api: api, budgetApi: budgets, prefs: prefs);
+  final store = ExpenseStore(
+    api: api,
+    budgetApi: budgets,
+    incomeApi: incomes,
+    prefs: prefs,
+  );
   final themeController = ThemeController(prefs);
   await themeController.initialize();
 
@@ -56,7 +63,7 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
     ),
   );
   await tester.pumpAndSettle();
-  return _Harness(authGateway, api, budgets, store);
+  return _Harness(authGateway, api, budgets, incomes, store);
 }
 
 const _name = 'Abdul Moiz';
@@ -572,6 +579,72 @@ void main() {
     await tester.tap(find.text('${now.day}').last);
     await tester.pumpAndSettle();
     expect(find.textContaining('entr'), findsWidgets);
+  });
+
+  testWidgets('setting pay turns the dashboard into savings tracking', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+    app.api.seed(userId, _sampleExpenses(DateTime.now()));
+    await app.store.refresh();
+    await tester.pumpAndSettle();
+
+    // Without pay there is only a prompt — savings cannot be computed.
+    expect(find.text('Add your monthly pay'), findsOneWidget);
+    expect(find.text('Pay & savings'), findsNothing);
+
+    await tester.tap(find.text('Add your monthly pay'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).first, '120000');
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Set pay'));
+    await tester.pumpAndSettle();
+
+    final now = DateTime.now();
+    expect(app.incomes.rowsFor(userId).single.amount, 120000);
+    expect(
+      app.incomes.rowsFor(userId).single.month,
+      DateTime(now.year, now.month),
+    );
+
+    // 4,200 + 2,500 + 900 = 7,600 spent this month, so 112,400 kept.
+    final money = app.store.monthMoney(now);
+    expect(money.income, 120000);
+    expect(money.spent, 7600);
+    expect(money.saved, 112400);
+    expect(find.text('Pay & savings'), findsOneWidget);
+    expect(find.textContaining('94% saved'), findsOneWidget);
+  });
+
+  testWidgets('pay carries forward but a raise does not rewrite history', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final now = DateTime.now();
+    final thisMonth = DateTime(now.year, now.month);
+    final twoMonthsAgo = DateTime(now.year, now.month - 2);
+
+    await app.store.saveIncome(twoMonthsAgo, 80000);
+    await tester.pumpAndSettle();
+
+    // The gap month and this month both inherit the older figure.
+    expect(app.store.monthMoney(thisMonth).income, 80000);
+    expect(app.store.monthMoney(thisMonth).carriedForward, isTrue);
+
+    // A raise entered for this month leaves the earlier months alone.
+    await app.store.saveIncome(thisMonth, 120000);
+    await tester.pumpAndSettle();
+    expect(app.store.monthMoney(thisMonth).income, 120000);
+    expect(app.store.monthMoney(thisMonth).carriedForward, isFalse);
+    expect(app.store.monthMoney(twoMonthsAgo).income, 80000);
+    expect(
+      app.store.monthMoney(DateTime(now.year, now.month - 3)).income,
+      isNull,
+      reason: 'nothing was earned on record before the first entry',
+    );
   });
 
   testWidgets('dark theme renders every screen', (tester) async {

@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/budget.dart';
 import '../models/expense.dart';
+import '../models/income.dart';
 
 /// On-device storage for two things only:
 ///
@@ -17,6 +18,7 @@ class LocalPrefs {
   static const _themeKey = 'theme_mode_v1';
   static String _cacheKey(String userId) => 'cache_expenses_$userId';
   static String _budgetKey(String userId) => 'cache_budgets_$userId';
+  static String _incomeKey(String userId) => 'cache_income_$userId';
 
   Future<SharedPreferences> get _prefs => SharedPreferences.getInstance();
 
@@ -81,6 +83,29 @@ class LocalPrefs {
     await (await _prefs).setString(
       _budgetKey(userId),
       jsonEncode(budgets.map((b) => b.toJson()).toList()),
+    );
+  }
+
+  Future<List<MonthlyIncome>> readIncomes(String userId) async {
+    final raw = (await _prefs).getString(_incomeKey(userId));
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return decoded
+          .whereType<Map<String, dynamic>>()
+          .map(MonthlyIncome.fromJson)
+          .whereType<MonthlyIncome>()
+          .toList();
+    } on FormatException {
+      return const [];
+    }
+  }
+
+  Future<void> writeIncomes(String userId, List<MonthlyIncome> incomes) async {
+    await (await _prefs).setString(
+      _incomeKey(userId),
+      jsonEncode(incomes.map((i) => i.toJson()).toList()),
     );
   }
 }

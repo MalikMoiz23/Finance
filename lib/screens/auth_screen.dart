@@ -332,7 +332,7 @@ class _Brand extends StatelessWidget {
         ),
         const SizedBox(height: 14),
         Text(
-          'Finance',
+          'FinTrack',
           style: context.text.titleMedium?.copyWith(
             fontSize: 24,
             letterSpacing: -0.6,
