@@ -91,7 +91,6 @@ class FakeExpenseApi implements ExpenseApi {
 
   final FakeAuthGateway _auth;
   final Map<String, List<Expense>> _rows = {};
-  int _nextId = 1;
 
   /// When true every call fails the way a dropped connection does.
   bool offline = false;
@@ -134,34 +133,15 @@ class FakeExpenseApi implements ExpenseApi {
   }
 
   @override
-  Future<Expense> create({
-    required double amount,
-    required ExpenseCategory category,
-    required DateTime date,
-    required String item,
-    required String note,
-  }) async {
+  Future<void> upsert(Expense expense) async {
     _guard(write: true);
-    final created = Expense(
-      id: 'row-${_nextId++}',
-      amount: amount,
-      category: category,
-      date: date,
-      item: item.trim(),
-      note: note.trim(),
-    );
-    _rows.putIfAbsent(_userId, () => []).add(created);
-    return created;
-  }
-
-  @override
-  Future<Expense> update(Expense expense) async {
-    _guard(write: true);
-    final rows = _rows[_userId] ?? [];
+    final rows = _rows.putIfAbsent(_userId, () => []);
     final index = rows.indexWhere((e) => e.id == expense.id);
-    if (index == -1) throw StateError('No row ${expense.id}');
-    rows[index] = expense;
-    return expense;
+    if (index == -1) {
+      rows.add(expense);
+    } else {
+      rows[index] = expense;
+    }
   }
 
   @override
@@ -211,7 +191,7 @@ class FakeBudgetApi implements BudgetApi {
   }
 
   @override
-  Future<Budget> save(ExpenseCategory category, double monthlyLimit) async {
+  Future<void> save(ExpenseCategory category, double monthlyLimit) async {
     _guard(write: true);
     final rows = _rows.putIfAbsent(_userId, () => []);
     final index = rows.indexWhere((b) => b.category == category);
@@ -225,13 +205,18 @@ class FakeBudgetApi implements BudgetApi {
     } else {
       rows[index] = saved;
     }
-    return saved;
   }
 
   @override
   Future<void> remove(ExpenseCategory category) async {
     _guard(write: true);
     (_rows[_userId] ?? []).removeWhere((b) => b.category == category);
+  }
+
+  @override
+  Future<void> removeAll() async {
+    _guard(write: true);
+    _rows[_userId]?.clear();
   }
 }
 
@@ -276,7 +261,7 @@ class FakeIncomeApi implements IncomeApi {
   }
 
   @override
-  Future<MonthlyIncome> save(DateTime month, double amount) async {
+  Future<void> save(DateTime month, double amount) async {
     _guard(write: true);
     final key = _monthOf(month);
     final rows = _rows.putIfAbsent(_userId, () => []);
@@ -291,7 +276,6 @@ class FakeIncomeApi implements IncomeApi {
     } else {
       rows[index] = saved;
     }
-    return saved;
   }
 
   @override

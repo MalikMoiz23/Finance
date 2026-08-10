@@ -4,19 +4,15 @@ import '../models/expense.dart';
 import '../models/expense_category.dart';
 
 /// Remote store for one account's expenses. Row level security scopes every
-/// call to the signed-in user, so no method takes a user id.
+/// call, so no method takes a user id.
+///
+/// Every write is an **upsert keyed on the row's own id**, which is generated on
+/// the device. That makes each operation safe to retry: replaying a queued
+/// change after a dropped connection can never create a duplicate.
 abstract interface class ExpenseApi {
   Future<List<Expense>> fetchAll();
 
-  Future<Expense> create({
-    required double amount,
-    required ExpenseCategory category,
-    required DateTime date,
-    required String item,
-    required String note,
-  });
-
-  Future<Expense> update(Expense expense);
+  Future<void> upsert(Expense expense);
 
   Future<void> delete(String id);
 
@@ -50,43 +46,17 @@ class SupabaseExpenseApi implements ExpenseApi {
   }
 
   @override
-  Future<Expense> create({
-    required double amount,
-    required ExpenseCategory category,
-    required DateTime date,
-    required String item,
-    required String note,
-  }) async {
-    final row = await _client
-        .from(table)
-        .insert({
-          'user_id': _userId,
-          'amount': amount,
-          'category': category.name,
-          'spent_on': _dateOnly(date),
-          'item': item.trim(),
-          'note': note.trim(),
-        })
-        .select()
-        .single();
-    return _fromRow(row);
-  }
-
-  @override
-  Future<Expense> update(Expense expense) async {
-    final row = await _client
-        .from(table)
-        .update({
-          'amount': expense.amount,
-          'category': expense.category.name,
-          'spent_on': _dateOnly(expense.date),
-          'item': expense.item.trim(),
-          'note': expense.note.trim(),
-        })
-        .eq('id', expense.id)
-        .select()
-        .single();
-    return _fromRow(row);
+  Future<void> upsert(Expense expense) async {
+    await _client.from(table).upsert({
+      'id': expense.id,
+      'user_id': _userId,
+      'amount': expense.amount,
+      'category': expense.category.name,
+      'spent_on': _dateOnly(expense.date),
+      'item': expense.item.trim(),
+      'note': expense.note.trim(),
+      'created_at': expense.createdAt.toUtc().toIso8601String(),
+    }, onConflict: 'id');
   }
 
   @override

@@ -8,10 +8,13 @@ import '../models/expense_category.dart';
 abstract interface class BudgetApi {
   Future<List<Budget>> fetchAll();
 
-  /// Creates or replaces the limit for a category.
-  Future<Budget> save(ExpenseCategory category, double monthlyLimit);
+  /// Creates or replaces the limit for a category. Safe to retry.
+  Future<void> save(ExpenseCategory category, double monthlyLimit);
 
   Future<void> remove(ExpenseCategory category);
+
+  /// Clears every limit for the signed-in account in one call.
+  Future<void> removeAll();
 }
 
 class SupabaseBudgetApi implements BudgetApi {
@@ -36,22 +39,13 @@ class SupabaseBudgetApi implements BudgetApi {
   }
 
   @override
-  Future<Budget> save(ExpenseCategory category, double monthlyLimit) async {
-    final row = await _client
-        .from(table)
-        .upsert({
-          'user_id': _userId,
-          'category': category.name,
-          'monthly_limit': monthlyLimit,
-          'updated_at': DateTime.now().toUtc().toIso8601String(),
-        }, onConflict: 'user_id,category')
-        .select()
-        .single();
-    final budget = Budget.fromJson(row);
-    if (budget == null) {
-      throw StateError('The server returned a budget row we could not read.');
-    }
-    return budget;
+  Future<void> save(ExpenseCategory category, double monthlyLimit) async {
+    await _client.from(table).upsert({
+      'user_id': _userId,
+      'category': category.name,
+      'monthly_limit': monthlyLimit,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    }, onConflict: 'user_id,category');
   }
 
   @override
@@ -61,5 +55,10 @@ class SupabaseBudgetApi implements BudgetApi {
         .delete()
         .eq('user_id', _userId)
         .eq('category', category.name);
+  }
+
+  @override
+  Future<void> removeAll() async {
+    await _client.from(table).delete().eq('user_id', _userId);
   }
 }

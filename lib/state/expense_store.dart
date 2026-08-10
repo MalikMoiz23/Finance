@@ -1,11 +1,15 @@
+import 'dart:async';
+
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:uuid/uuid.dart';
 
 import '../core/error_messages.dart';
 import '../core/formatters.dart';
 import '../data/budget_api.dart';
 import '../data/expense_api.dart';
 import '../data/income_api.dart';
-import '../data/local_prefs.dart';
+import '../data/local_db.dart';
 import '../models/analytics.dart';
 import '../models/app_user.dart';
 import '../models/budget.dart';
@@ -15,33 +19,65 @@ import '../models/income.dart';
 import '../models/item_catalog.dart';
 import '../models/period.dart';
 
-/// Single source of truth for the signed-in account's expenses, budgets, and the
-/// period the whole UI is scoped by.
+/// Where the local copy stands against the server.
+enum SyncState {
+  /// Everything on this device has reached Supabase.
+  synced,
+
+  /// Pushing or pulling right now.
+  syncing,
+
+  /// Changes are waiting because there is no usable connection.
+  waiting,
+}
+
+/// Single source of truth for the signed-in account's expenses, budgets, pay and
+/// the period the UI is scoped by.
 ///
-/// Reads: the on-device cache paints first, then Supabase overwrites it. If the
-/// fetch fails, the cached list stays on screen and [syncError] is set, so the
-/// app is readable offline even though writes need a connection.
+/// **Offline first.** Every read comes from the device's own database, and every
+/// write lands there first and is queued in an outbox — so the app is fully
+/// usable with no connection and the UI never waits on the network. The queue is
+/// drained automatically whenever connectivity returns.
 ///
-/// Writes: straight to Supabase. Every mutating method throws on failure so the
-/// calling screen can show the message and keep the user's input.
+/// Conflicts resolve to the most recent edit: a queued local change wins over
+/// server data for the same row (its edit is newer), and for every other row the
+/// server's copy replaces the local one on each pull.
 class ExpenseStore extends ChangeNotifier {
   ExpenseStore({
     required ExpenseApi api,
     required BudgetApi budgetApi,
     required IncomeApi incomeApi,
-    required LocalPrefs prefs,
+    required LocalDb localDb,
+    Stream<bool>? onlineChanges,
   }) : _api = api,
        _budgetApi = budgetApi,
        _incomeApi = incomeApi,
-       _prefs = prefs {
+       _local = localDb {
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
     _summary = _compute();
+    // A regained connection drains the outbox without the user doing anything.
+    _connection = (onlineChanges ?? _defaultOnlineChanges()).listen((online) {
+      final wasOffline = !_online;
+      _online = online;
+      if (online && wasOffline) {
+        sync();
+      } else {
+        _refresh();
+      }
+    });
   }
+
+  static Stream<bool> _defaultOnlineChanges() => Connectivity()
+      .onConnectivityChanged
+      .map((results) => results.any((r) => r != ConnectivityResult.none));
 
   final ExpenseApi _api;
   final BudgetApi _budgetApi;
   final IncomeApi _incomeApi;
-  final LocalPrefs _prefs;
+  final LocalDb _local;
+  static const _uuid = Uuid();
+
+  late final StreamSubscription<bool> _connection;
 
   final List<Expense> _expenses = [];
   final List<Budget> _budgets = [];
@@ -52,7 +88,10 @@ class ExpenseStore extends ChangeNotifier {
 
   String? _userId;
   bool _loading = false;
-  bool _loadedFromServer = false;
+  bool _online = true;
+  bool _syncing = false;
+
+  int _pending = 0;
   String? _syncError;
   bool _disposed = false;
 
@@ -63,11 +102,22 @@ class ExpenseStore extends ChangeNotifier {
   int get totalEntryCount => _expenses.length;
   List<Expense> get allExpenses => List.unmodifiable(_expenses);
   List<Budget> get budgets => List.unmodifiable(_budgets);
+  List<MonthlyIncome> get incomes => List.unmodifiable(_incomes);
 
-  /// Why the last sync failed, or null when the data on screen is fresh.
+  /// How many changes are still waiting to reach Supabase.
+  int get pendingCount => _pending;
+
+  bool get isOnline => _online;
+
+  SyncState get syncState {
+    if (_syncing) return SyncState.syncing;
+    if (_pending > 0) return SyncState.waiting;
+    return SyncState.synced;
+  }
+
+  /// Why the last sync attempt failed, if it did. Never blocks the UI: the local
+  /// data is authoritative until the queue drains.
   String? get syncError => _syncError;
-
-  bool get isShowingCachedData => _syncError != null && !_loadedFromServer;
 
   String get rangeLabel => Periods.rangeLabel(_period, _anchor);
 
@@ -81,15 +131,10 @@ class ExpenseStore extends ChangeNotifier {
 
   // ------------------------------------------------------------- budgets ---
 
-  /// Budgets are monthly, so they always report against the current calendar
-  /// month regardless of which period the dashboard is showing.
   DateRange get budgetMonth => Periods.rangeOf(Period.month, DateTime.now());
 
   String get budgetMonthLabel => Dates.monthYear(budgetMonth.start);
 
-  /// Which month the calendar shows: the one containing today when the selected
-  /// period includes it, otherwise the month the period starts in. (Anchoring
-  /// straight on the anchor would show January whenever the period is a year.)
   DateTime get calendarMonth {
     final now = DateTime.now();
     final range = Periods.rangeOf(_period, _anchor);
@@ -97,7 +142,6 @@ class ExpenseStore extends ChangeNotifier {
     return DateTime(reference.year, reference.month);
   }
 
-  /// Total per day for [month], keyed by midnight — the calendar heatmap.
   Map<DateTime, double> dailyTotals(DateTime month) {
     final totals = <DateTime, double>{};
     for (final expense in _expenses) {
@@ -128,7 +172,6 @@ class ExpenseStore extends ChangeNotifier {
     return budgetMonth.endExclusive.difference(today).inDays;
   }
 
-  /// Worst first, so what needs attention is at the top.
   List<BudgetStatus> get budgetStatuses {
     final statuses = _budgets
         .map(
@@ -152,44 +195,18 @@ class ExpenseStore extends ChangeNotifier {
   double get totalBudgeted =>
       _budgets.fold<double>(0, (sum, b) => sum + b.monthlyLimit);
 
-  /// Spending inside categories that actually have a limit set.
   double get spentAgainstBudgets =>
       _budgets.fold<double>(0, (sum, b) => sum + spentThisMonth(b.category));
 
-  Future<void> saveBudget(ExpenseCategory category, double monthlyLimit) async {
-    final saved = await _budgetApi.save(category, monthlyLimit);
-    final index = _budgets.indexWhere((b) => b.category == category);
-    if (index == -1) {
-      _budgets.add(saved);
-    } else {
-      _budgets[index] = saved;
-    }
-    _refresh();
-    await _persistCache();
-  }
-
-  Future<void> removeBudget(ExpenseCategory category) async {
-    await _budgetApi.remove(category);
-    _budgets.removeWhere((b) => b.category == category);
-    _refresh();
-    await _persistCache();
-  }
-
   // ----------------------------------------------------------- monthly pay ---
-
-  List<MonthlyIncome> get incomes => List.unmodifiable(_incomes);
 
   static DateTime _monthOf(DateTime date) => DateTime(date.year, date.month);
 
-  /// The row recorded *for* this exact month, if any.
   MonthlyIncome? incomeRowFor(DateTime month) {
     final key = _monthOf(month);
     return _incomes.where((i) => i.month == key).firstOrNull;
   }
 
-  /// Pay that applies to [month]: its own figure, else the most recent earlier
-  /// one carried forward, else null. A raise therefore only affects the month
-  /// it was entered for and the months after it.
   ({double amount, bool carriedForward})? effectiveIncome(DateTime month) {
     final key = _monthOf(month);
     final exact = incomeRowFor(key);
@@ -222,7 +239,6 @@ class ExpenseStore extends ChangeNotifier {
     );
   }
 
-  /// The current calendar month set against the one before it.
   MonthComparison get thisMonthVsLast {
     final now = DateTime.now();
     final current = DateTime(now.year, now.month);
@@ -234,40 +250,18 @@ class ExpenseStore extends ChangeNotifier {
 
   bool get hasAnyIncome => _incomes.isNotEmpty;
 
-  Future<void> saveIncome(DateTime month, double amount) async {
-    final saved = await _incomeApi.save(_monthOf(month), amount);
-    final index = _incomes.indexWhere((i) => i.month == saved.month);
-    if (index == -1) {
-      _incomes.add(saved);
-    } else {
-      _incomes[index] = saved;
-    }
-    _incomes.sort((a, b) => a.month.compareTo(b.month));
-    _refresh();
-    await _persistCache();
-  }
-
-  Future<void> removeIncome(DateTime month) async {
-    final key = _monthOf(month);
-    await _incomeApi.remove(key);
-    _incomes.removeWhere((i) => i.month == key);
-    _refresh();
-    await _persistCache();
-  }
-
   // --------------------------------------------------------------- items ---
 
-  /// Autocomplete for the item field: own history first, then the catalogue.
   List<ItemSuggestion> suggestItems(String query, {int limit = 6}) =>
       ItemCatalog.suggest(query: query, history: _expenses, limit: limit);
 
-  /// One-tap "buy again" chips.
   List<ItemSuggestion> recentItems({int limit = 6}) =>
       ItemCatalog.recent(_expenses, limit: limit);
 
+  Expense? get mostRecent => _expenses.firstOrNull;
+
   // ---------------------------------------------------------- load / sync ---
 
-  /// Points the store at an account, or clears it on sign-out.
   Future<void> bindUser(AppUser? user) async {
     if (user == null) {
       _userId = null;
@@ -275,7 +269,7 @@ class ExpenseStore extends ChangeNotifier {
       _budgets.clear();
       _incomes.clear();
       _loading = false;
-      _loadedFromServer = false;
+      _pending = 0;
       _syncError = null;
       jumpToToday();
       return;
@@ -286,83 +280,160 @@ class ExpenseStore extends ChangeNotifier {
     _expenses.clear();
     _budgets.clear();
     _incomes.clear();
-    _loadedFromServer = false;
     _syncError = null;
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
 
-    final cached = await _prefs.readCache(user.id);
-    final cachedBudgets = await _prefs.readBudgets(user.id);
-    final cachedIncomes = await _prefs.readIncomes(user.id);
-    if (_userId != user.id) return; // switched accounts mid-read
-    if (cached.isNotEmpty) {
-      _expenses.addAll(cached);
-      _sort();
-    }
-    _budgets.addAll(cachedBudgets);
-    _incomes.addAll(cachedIncomes);
-    _refresh();
-
-    await refresh();
+    await _local.open();
+    await _loadFromLocal(user.id);
+    await sync();
   }
 
-  /// Re-fetches from Supabase. Keeps whatever is on screen if it fails.
-  Future<void> refresh() async {
+  Future<void> _loadFromLocal(String userId) async {
+    final expenses = await _local.readExpenses(userId);
+    final budgets = await _local.readBudgets(userId);
+    final incomes = await _local.readIncomes(userId);
+    final pending = await _local.pendingCount(userId);
+    if (_userId != userId) return;
+    _expenses
+      ..clear()
+      ..addAll(expenses);
+    _budgets
+      ..clear()
+      ..addAll(budgets);
+    _incomes
+      ..clear()
+      ..addAll(incomes);
+    _sort();
+    _pending = pending;
+    _refresh();
+  }
+
+  /// Pull-to-refresh and the automatic reconnect both land here.
+  Future<void> refresh() => sync();
+
+  /// Pushes everything queued, then pulls the server's copy.
+  ///
+  /// Safe to call at any time: if the network is unavailable it records why and
+  /// leaves the queue intact for the next attempt.
+  Future<void> sync({int pass = 0}) async {
     final userId = _userId;
     if (userId == null) return;
+    // A pass already running will re-check the queue when it finishes, so a
+    // concurrent request can simply be dropped.
+    if (_syncing) return;
 
-    _loading = true;
+    _syncing = true;
+    _loading = _expenses.isEmpty;
     _refresh();
     try {
-      final rows = await _api.fetchAll();
+      await _pushPending(userId);
+      await _pullFromServer(userId);
       if (_userId != userId) return;
-      _expenses
-        ..clear()
-        ..addAll(rows);
-      _sort();
-      _loadedFromServer = true;
       _syncError = null;
+      _online = true;
     } catch (error) {
       if (_userId != userId) return;
       _syncError = describeError(error);
+      _online = false;
+    } finally {
+      if (_userId == userId) {
+        _pending = await _local.pendingCount(userId);
+        _syncing = false;
+        _loading = false;
+        _refresh();
+      }
     }
 
-    // Budgets and pay are optional layers: if either table is unreachable the
-    // expenses above must still render, so these failures are kept out of
-    // syncError and the cached values stay.
-    try {
-      final rows = await _budgetApi.fetchAll();
+    // A burst of writes can queue ops after this pass read the outbox, so the
+    // condition is the queue itself rather than a flag — that cannot race. A
+    // failed push sets _online false, and every successful push removes its op,
+    // so this terminates; the pass cap is a backstop, not the mechanism.
+    final again = _online && _pending > 0 && pass < 4;
+    if (again && _userId == userId) await sync(pass: pass + 1);
+  }
+
+  /// Drains the outbox oldest-first. Stops at the first failure so ordering is
+  /// preserved and nothing is dropped.
+  Future<void> _pushPending(String userId) async {
+    final ops = await _local.pendingOps(userId);
+    for (final op in ops) {
       if (_userId != userId) return;
-      _budgets
-        ..clear()
-        ..addAll(rows);
-    } catch (_) {
-      // Keep whatever budgets the cache gave us.
+      switch ((op.entity, op.action)) {
+        case (SyncEntity.expense, SyncAction.upsert):
+          final expense = op.expense;
+          if (expense != null) await _api.upsert(expense);
+        case (SyncEntity.expense, SyncAction.delete):
+          await _api.delete(op.key);
+        case (SyncEntity.expense, SyncAction.deleteAll):
+          await _api.deleteAll();
+        case (SyncEntity.budget, SyncAction.upsert):
+          final budget = op.budget;
+          if (budget != null) {
+            await _budgetApi.save(budget.category, budget.monthlyLimit);
+          }
+        case (SyncEntity.budget, SyncAction.delete):
+          await _budgetApi.remove(op.category);
+        case (SyncEntity.budget, SyncAction.deleteAll):
+          await _budgetApi.removeAll();
+        case (SyncEntity.income, SyncAction.upsert):
+          final income = op.income;
+          if (income != null) {
+            await _incomeApi.save(income.month, income.amount);
+          }
+        case (SyncEntity.income, SyncAction.delete):
+          await _incomeApi.remove(op.month);
+        case (SyncEntity.income, SyncAction.deleteAll):
+          break; // no such operation for pay
+      }
+      await _local.completeOp(userId, op.id);
+      _pending = await _local.pendingCount(userId);
+      _refresh();
     }
+  }
 
-    try {
-      final rows = await _incomeApi.fetchAll();
-      if (_userId != userId) return;
-      _incomes
-        ..clear()
-        ..addAll(rows);
-      _incomes.sort((a, b) => a.month.compareTo(b.month));
-    } catch (_) {
-      // Keep whatever pay the cache gave us.
-    }
-
+  /// Replaces the local copy with the server's, except for rows that still have
+  /// a queued change — those edits are newer and must survive the pull.
+  Future<void> _pullFromServer(String userId) async {
+    final remoteExpenses = await _api.fetchAll();
+    final remoteBudgets = await _budgetApi.fetchAll();
+    final remoteIncomes = await _incomeApi.fetchAll();
     if (_userId != userId) return;
-    await _persistCache();
-    _loading = false;
-    _refresh();
+
+    final ops = await _local.pendingOps(userId);
+    Set<String> keys(SyncEntity entity) => ops
+        .where((o) => o.entity == entity && o.key.isNotEmpty)
+        .map((o) => o.key)
+        .toSet();
+
+    await _local.replaceExpenses(
+      userId,
+      remoteExpenses,
+      keepKeys: keys(SyncEntity.expense),
+    );
+    await _local.replaceBudgets(
+      userId,
+      remoteBudgets,
+      keepKeys: keys(SyncEntity.budget),
+    );
+    await _local.replaceIncomes(
+      userId,
+      remoteIncomes,
+      keepKeys: keys(SyncEntity.income),
+    );
+    await _loadFromLocal(userId);
+  }
+
+  /// Best-effort push after a local write. Never throws: the change is already
+  /// safe on the device.
+  void _syncSoon() {
+    if (_userId == null) return;
+    Future.microtask(sync);
   }
 
   // -------------------------------------------------------------- period ---
 
   void setPeriod(Period period) {
     if (period == _period) return;
-    // Switching granularity keeps the reader where they were: today if the
-    // window they were on includes it, otherwise the window's first day.
-    // (Re-anchoring on the raw anchor would drop Year -> Month onto January.)
     final now = DateTime.now();
     final current = Periods.rangeOf(_period, _anchor);
     final reference = current.contains(now) ? now : current.start;
@@ -382,8 +453,6 @@ class ExpenseStore extends ChangeNotifier {
     _refresh();
   }
 
-  /// Moves the window onto [date] — used after saving an expense dated outside
-  /// the period on screen, so the entry is never saved out of sight.
   void focusOn(DateTime date) {
     final anchor = Periods.normalizeAnchor(_period, date);
     if (anchor == _anchor) return;
@@ -393,6 +462,8 @@ class ExpenseStore extends ChangeNotifier {
 
   // ------------------------------------------------------------- expenses ---
 
+  /// Saves locally and queues the push. Returns as soon as the device has it,
+  /// so this succeeds with no connection.
   Future<void> create({
     required double amount,
     required ExpenseCategory category,
@@ -400,53 +471,69 @@ class ExpenseStore extends ChangeNotifier {
     required String item,
     required String note,
   }) async {
-    final created = await _api.create(
+    // The id is generated here, not by the server, so an expense created offline
+    // keeps its identity when it finally syncs.
+    final expense = Expense(
+      id: _uuid.v4(),
       amount: amount,
       category: category,
       date: date,
-      item: item,
-      note: note,
+      item: item.trim(),
+      note: note.trim(),
     );
-    _expenses.add(created);
-    _sort();
-    _syncError = null;
-    _refresh();
-    await _persistCache();
+    await update(expense);
   }
 
   Future<void> update(Expense expense) async {
-    final saved = await _api.update(expense);
-    final index = _expenses.indexWhere((e) => e.id == saved.id);
+    final userId = _requireUser();
+    await _local.putExpense(userId, expense);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.expense,
+        action: SyncAction.upsert,
+        key: expense.id,
+        payload: expense.toJson(),
+      ),
+    );
+    final index = _expenses.indexWhere((e) => e.id == expense.id);
     if (index == -1) {
-      _expenses.add(saved);
+      _expenses.add(expense);
     } else {
-      _expenses[index] = saved;
+      _expenses[index] = expense;
     }
     _sort();
-    _syncError = null;
+    _pending = await _local.pendingCount(userId);
     _refresh();
-    await _persistCache();
+    _syncSoon();
   }
 
   Future<void> remove(String id) async {
-    await _api.delete(id);
+    final userId = _requireUser();
+    await _local.removeExpense(userId, id);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.expense,
+        action: SyncAction.delete,
+        key: id,
+        payload: {'id': id},
+      ),
+    );
     _expenses.removeWhere((e) => e.id == id);
-    _syncError = null;
+    _pending = await _local.pendingCount(userId);
     _refresh();
-    await _persistCache();
+    _syncSoon();
   }
 
-  /// The most recent entry, whatever period is on screen.
-  Expense? get mostRecent => _expenses.firstOrNull;
-
-  /// Logs the same thing again, dated today — the fastest possible entry for
-  /// something bought repeatedly. Returns null when there is nothing to repeat.
-  Future<Expense?> repeatMostRecent() async {
-    final last = mostRecent;
-    if (last == null) return null;
-    await duplicate(last);
-    return last;
-  }
+  /// Undo for a deleted expense: written back as a new row.
+  Future<void> restore(Expense expense) => create(
+    amount: expense.amount,
+    category: expense.category,
+    date: expense.date,
+    item: expense.item,
+    note: expense.note,
+  );
 
   /// Copies an existing expense onto today.
   Future<void> duplicate(Expense expense) => create(
@@ -457,30 +544,150 @@ class ExpenseStore extends ChangeNotifier {
     note: expense.note,
   );
 
-  /// Undo for a deleted expense: the row is gone, so this writes it back as a
-  /// new row with the same values.
-  Future<void> restore(Expense expense) => create(
-    amount: expense.amount,
-    category: expense.category,
-    date: expense.date,
-    item: expense.item,
-    note: expense.note,
-  );
-
-  Future<void> clearAll() async {
-    await _api.deleteAll();
-    _expenses.clear();
-    _syncError = null;
-    _refresh();
-    await _persistCache();
+  Future<Expense?> repeatMostRecent() async {
+    final last = mostRecent;
+    if (last == null) return null;
+    await duplicate(last);
+    return last;
   }
 
-  Future<void> _persistCache() async {
+  Future<void> clearAll() async {
+    final userId = _requireUser();
+    for (final expense in [..._expenses]) {
+      await _local.removeExpense(userId, expense.id);
+    }
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.expense,
+        action: SyncAction.deleteAll,
+        payload: const {},
+      ),
+    );
+    _expenses.clear();
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  // -------------------------------------------------------------- budgets ---
+
+  Future<void> saveBudget(ExpenseCategory category, double monthlyLimit) async {
+    final userId = _requireUser();
+    final budget = Budget(category: category, monthlyLimit: monthlyLimit);
+    await _local.putBudget(userId, budget);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.budget,
+        action: SyncAction.upsert,
+        key: category.name,
+        payload: budget.toJson(),
+      ),
+    );
+    final index = _budgets.indexWhere((b) => b.category == category);
+    if (index == -1) {
+      _budgets.add(budget);
+    } else {
+      _budgets[index] = budget;
+    }
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  Future<void> removeBudget(ExpenseCategory category) async {
+    final userId = _requireUser();
+    await _local.removeBudget(userId, category);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.budget,
+        action: SyncAction.delete,
+        key: category.name,
+        payload: {'category': category.name},
+      ),
+    );
+    _budgets.removeWhere((b) => b.category == category);
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  /// Clears every monthly limit. Expenses are untouched.
+  Future<void> clearAllBudgets() async {
+    final userId = _requireUser();
+    for (final budget in [..._budgets]) {
+      await _local.removeBudget(userId, budget.category);
+    }
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.budget,
+        action: SyncAction.deleteAll,
+        payload: const {},
+      ),
+    );
+    _budgets.clear();
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  // ------------------------------------------------------------ monthly pay ---
+
+  Future<void> saveIncome(DateTime month, double amount) async {
+    final userId = _requireUser();
+    final income = MonthlyIncome(month: _monthOf(month), amount: amount);
+    await _local.putIncome(userId, income);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.income,
+        action: SyncAction.upsert,
+        key: income.toJson()['month'] as String,
+        payload: income.toJson(),
+      ),
+    );
+    final index = _incomes.indexWhere((i) => i.month == income.month);
+    if (index == -1) {
+      _incomes.add(income);
+    } else {
+      _incomes[index] = income;
+    }
+    _incomes.sort((a, b) => a.month.compareTo(b.month));
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  Future<void> removeIncome(DateTime month) async {
+    final userId = _requireUser();
+    final key = _monthOf(month);
+    await _local.removeIncome(userId, key);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.income,
+        action: SyncAction.delete,
+        key: MonthlyIncome(month: key, amount: 0).toJson()['month'] as String,
+        payload: {'month': key.toIso8601String(), 'amount': 0},
+      ),
+    );
+    _incomes.removeWhere((i) => i.month == key);
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  // --------------------------------------------------------------- internals ---
+
+  String _requireUser() {
     final userId = _userId;
-    if (userId == null) return;
-    await _prefs.writeCache(userId, _expenses);
-    await _prefs.writeBudgets(userId, _budgets);
-    await _prefs.writeIncomes(userId, _incomes);
+    if (userId == null) {
+      throw StateError('No account is signed in, so there is nowhere to save.');
+    }
+    return userId;
   }
 
   void _sort() {
@@ -505,6 +712,7 @@ class ExpenseStore extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _connection.cancel();
     super.dispose();
   }
 }

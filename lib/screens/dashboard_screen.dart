@@ -59,9 +59,9 @@ class DashboardScreen extends StatelessWidget {
         ),
         children: [
           const _DashboardHeader(),
-          if (store.syncError != null) ...[
+          if (store.syncState != SyncState.synced) ...[
             const SizedBox(height: 14),
-            _SyncBanner(message: store.syncError!, onRetry: store.refresh),
+            _SyncStatus(store: store),
           ],
           const SizedBox(height: 20),
           const Entrance(index: 0, child: PeriodFilterBar()),
@@ -301,46 +301,69 @@ class _BudgetSummary extends StatelessWidget {
   }
 }
 
-/// Shown when the last fetch failed. The numbers on screen are the cached ones,
-/// so the app stays readable — but they may be out of date.
-class _SyncBanner extends StatelessWidget {
-  const _SyncBanner({required this.message, required this.onRetry});
+/// Where this device stands against the server.
+///
+/// Deliberately reassuring rather than alarming: working offline is a supported
+/// state, not an error, so it says what is happening and how many changes are
+/// waiting instead of warning about a failure.
+class _SyncStatus extends StatelessWidget {
+  const _SyncStatus({required this.store});
 
-  final String message;
-  final Future<void> Function() onRetry;
+  final ExpenseStore store;
 
   @override
   Widget build(BuildContext context) {
     final viz = context.viz;
+    final syncing = store.syncState == SyncState.syncing;
+    final count = store.pendingCount;
+    final tone = syncing ? viz.series : viz.warning;
+
+    final message = syncing
+        ? 'Saving to your account…'
+        : count == 0
+        ? 'Waiting for a connection'
+        : 'Saved on this device · $count '
+              '${count == 1 ? 'change' : 'changes'} waiting to upload';
+
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
       decoration: BoxDecoration(
-        color: viz.critical.withValues(alpha: 0.10),
+        color: tone.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(14),
       ),
       child: Row(
         children: [
-          Icon(Icons.cloud_off_rounded, size: 17, color: viz.critical),
+          if (syncing)
+            SizedBox(
+              width: 15,
+              height: 15,
+              child: CircularProgressIndicator(strokeWidth: 2, color: tone),
+            )
+          else
+            Icon(Icons.cloud_off_rounded, size: 17, color: tone),
           const SizedBox(width: 9),
           Expanded(
             child: Text(
               message,
               style: context.text.bodySmall?.copyWith(
-                color: viz.critical,
+                // Warning amber is below text contrast on the light surface, so
+                // the wording stays in ink and the icon carries the colour.
+                color: viz.inkSecondary,
                 fontWeight: FontWeight.w500,
                 height: 1.3,
               ),
             ),
           ),
-          TextButton(
-            onPressed: () => onRetry(),
-            style: TextButton.styleFrom(
-              foregroundColor: viz.critical,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              minimumSize: const Size(0, 34),
+          if (!syncing)
+            TextButton(
+              onPressed: store.sync,
+              style: TextButton.styleFrom(
+                foregroundColor: viz.series,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                minimumSize: const Size(0, 34),
+              ),
+              child: const Text('Try now'),
             ),
-            child: const Text('Retry'),
-          ),
         ],
       ),
     );
@@ -504,6 +527,7 @@ class _DashboardHeader extends StatelessWidget {
               side: BorderSide(color: viz.hairline),
             ),
             onSelected: (value) => switch (value) {
+              'income' => IncomeSheet.show(context),
               'export' => _copyCsv(context),
               'clear' => _confirmClear(context),
               'signout' => _confirmSignOut(context),
@@ -535,6 +559,20 @@ class _DashboardHeader extends StatelessWidget {
                   ),
                 ),
               const PopupMenuDivider(),
+              PopupMenuItem<String>(
+                value: 'income',
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.payments_rounded,
+                      size: 19,
+                      color: viz.successText,
+                    ),
+                    const SizedBox(width: 10),
+                    const Flexible(child: Text('Set monthly income')),
+                  ],
+                ),
+              ),
               PopupMenuItem<String>(
                 value: 'export',
                 child: Row(

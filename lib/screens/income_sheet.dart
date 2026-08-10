@@ -162,16 +162,6 @@ class _IncomeSheetState extends State<IncomeSheet> {
                     style: context.text.titleMedium?.copyWith(fontSize: 19),
                   ),
                 ),
-                if (exact != null)
-                  IconButton(
-                    onPressed: _saving ? null : _remove,
-                    tooltip: 'Remove this month\'s figure',
-                    icon: const Icon(Icons.delete_outline_rounded),
-                    style: IconButton.styleFrom(
-                      foregroundColor: viz.critical,
-                      backgroundColor: viz.critical.withValues(alpha: 0.10),
-                    ),
-                  ),
               ],
             ),
             const SizedBox(height: 14),
@@ -353,6 +343,31 @@ class _IncomeSheetState extends State<IncomeSheet> {
                       ),
               ),
             ),
+            // Spelled out for the same reason as the budget sheet: a bin icon
+            // in the header is not a findable way to undo something.
+            if (exact != null) ...[
+              const SizedBox(height: 10),
+              SizedBox(
+                height: 48,
+                child: OutlinedButton.icon(
+                  onPressed: _saving ? null : _remove,
+                  icon: const Icon(Icons.delete_outline_rounded, size: 19),
+                  label: Text('Remove ${Dates.monthYear(_month)} income'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: viz.critical,
+                    side: BorderSide(
+                      color: viz.critical.withValues(alpha: 0.4),
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    textStyle: context.text.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),

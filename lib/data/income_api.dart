@@ -6,8 +6,8 @@ import '../models/income.dart';
 abstract interface class IncomeApi {
   Future<List<MonthlyIncome>> fetchAll();
 
-  /// Sets (or replaces) the pay recorded for [month].
-  Future<MonthlyIncome> save(DateTime month, double amount);
+  /// Sets (or replaces) the pay recorded for [month]. Safe to retry.
+  Future<void> save(DateTime month, double amount);
 
   Future<void> remove(DateTime month);
 }
@@ -38,22 +38,13 @@ class SupabaseIncomeApi implements IncomeApi {
   }
 
   @override
-  Future<MonthlyIncome> save(DateTime month, double amount) async {
-    final row = await _client
-        .from(table)
-        .upsert({
-          'user_id': _userId,
-          'month': _firstOfMonth(month),
-          'amount': amount,
-          'updated_at': DateTime.now().toUtc().toIso8601String(),
-        }, onConflict: 'user_id,month')
-        .select()
-        .single();
-    final saved = MonthlyIncome.fromJson(row);
-    if (saved == null) {
-      throw StateError('The server returned an income row we could not read.');
-    }
-    return saved;
+  Future<void> save(DateTime month, double amount) async {
+    await _client.from(table).upsert({
+      'user_id': _userId,
+      'month': _firstOfMonth(month),
+      'amount': amount,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    }, onConflict: 'user_id,month');
   }
 
   @override

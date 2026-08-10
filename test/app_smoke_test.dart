@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:finance/app.dart';
 import 'package:finance/core/formatters.dart';
+import 'package:finance/data/json_local_db.dart';
 import 'package:finance/data/local_prefs.dart';
 import 'package:finance/models/budget.dart';
 import 'package:finance/models/expense.dart';
@@ -18,13 +21,23 @@ import 'support/fakes.dart';
 /// Supabase auth and the expenses table. Any overflow, null or layout assertion
 /// in the widgets below fails these tests.
 class _Harness {
-  _Harness(this.auth, this.api, this.budgets, this.incomes, this.store);
+  _Harness(
+    this.auth,
+    this.api,
+    this.budgets,
+    this.incomes,
+    this.store,
+    this.online,
+  );
 
   final FakeAuthGateway auth;
   final FakeExpenseApi api;
   final FakeBudgetApi budgets;
   final FakeIncomeApi incomes;
   final ExpenseStore store;
+
+  /// Push false to simulate losing the connection, true to regain it.
+  final StreamController<bool> online;
 }
 
 Future<_Harness> _bootApp(WidgetTester tester) async {
@@ -41,11 +54,18 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
   final budgets = FakeBudgetApi(authGateway);
   final incomes = FakeIncomeApi(authGateway);
   final prefs = LocalPrefs();
+  // In-memory LocalDb: same contract and outbox as SQLite, no plugin needed.
+  final localDb = JsonLocalDb(MemoryKeyValueStore());
+  // The connectivity plugin is unavailable in tests, so the online signal is
+  // injected and each test can drop the connection deliberately.
+  final online = StreamController<bool>.broadcast();
+  addTearDown(online.close);
   final store = ExpenseStore(
     api: api,
     budgetApi: budgets,
     incomeApi: incomes,
-    prefs: prefs,
+    localDb: localDb,
+    onlineChanges: online.stream,
   );
   final themeController = ThemeController(prefs);
   await themeController.initialize();
@@ -63,7 +83,7 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
     ),
   );
   await tester.pumpAndSettle();
-  return _Harness(authGateway, api, budgets, incomes, store);
+  return _Harness(authGateway, api, budgets, incomes, store, online);
 }
 
 const _name = 'Abdul Moiz';
@@ -137,6 +157,13 @@ Finder get _verticalScroll => find
     )
     .first;
 
+/// The period pills live at the top, so a test that scrolled down to read a
+/// chart must come back up before it can tap them.
+Future<void> _toTop(WidgetTester tester) async {
+  await tester.drag(_verticalScroll, const Offset(0, 3000));
+  await tester.pumpAndSettle();
+}
+
 Future<void> _revealText(WidgetTester tester, String text) async {
   await tester.scrollUntilVisible(
     find.text(text),
@@ -195,6 +222,7 @@ void main() {
     expect(find.text('Total spent · This month'), findsOneWidget);
     // A brand new account starts empty.
     expect(app.store.totalEntryCount, 0);
+    await _revealText(tester, 'Nothing logged yet');
     expect(find.text('Nothing logged yet'), findsOneWidget);
   });
 
@@ -293,50 +321,136 @@ void main() {
     expect(app.api.rowsFor(first).length, 1, reason: 'first account untouched');
   });
 
-  testWidgets('a failed sync shows the banner and keeps the cached data', (
+  testWidgets('a failed sync leaves the local data fully readable', (
     tester,
   ) async {
     final app = await _bootApp(tester);
     await _register(tester);
 
     app.api.seed(app.auth.currentUser!.id, _sampleExpenses(DateTime.now()));
-    await app.store.refresh();
+    await app.store.sync();
     await tester.pumpAndSettle();
     expect(app.store.totalEntryCount, 3);
 
+    // A sync that cannot reach the server changes nothing on screen: the local
+    // database is the source the UI reads from.
     app.api.offline = true;
-    await app.store.refresh();
+    await app.store.sync();
     await tester.pumpAndSettle();
 
-    expect(
-      find.text('No internet connection. Check your network and try again.'),
-      findsOneWidget,
-    );
-    expect(find.text('Retry'), findsOneWidget);
-    // The numbers stay on screen — reading works offline.
     expect(app.store.totalEntryCount, 3);
+    expect(app.store.summary.total, 7600);
     expect(find.text('Total spent · This month'), findsOneWidget);
+    // Nothing was queued, so there is no "waiting" banner to show.
+    expect(app.store.pendingCount, 0);
+    expect(app.store.syncState, SyncState.synced);
+    expect(app.store.syncError, isNotNull);
 
     app.api.offline = false;
-    await tester.tap(find.text('Retry'));
+    await app.store.sync();
     await tester.pumpAndSettle();
     expect(app.store.syncError, isNull);
   });
 
-  testWidgets('a failed write keeps the sheet open with the reason', (
+  testWidgets('a write the server rejects is kept locally and queued', (
     tester,
   ) async {
     final app = await _bootApp(tester);
     await _register(tester);
+    final userId = app.auth.currentUser!.id;
 
+    // The push fails, but the expense is already safe on the device — the whole
+    // point of writing locally first. The sheet closes as normal.
     app.api.failNextWrite = true;
-    await _addExpenseThroughUi(tester, amount: '1500');
+    await _addExpenseThroughUi(tester, amount: '1500', item: 'Chicken');
 
-    expect(find.text('Edit expense'), findsNothing);
-    expect(find.text('Add expense'), findsWidgets); // sheet still open
-    expect(find.textContaining('No internet connection'), findsOneWidget);
-    expect(app.api.rowsFor(app.auth.currentUser!.id), isEmpty);
-    expect(app.store.totalEntryCount, 0);
+    expect(app.store.totalEntryCount, 1);
+    expect(app.store.summary.total, 1500);
+    expect(app.api.rowsFor(userId), isEmpty, reason: 'server never got it');
+    expect(app.store.pendingCount, 1, reason: 'still queued');
+
+    // Next sync drains it — nothing was lost and nothing is duplicated.
+    await app.store.sync();
+    await tester.pumpAndSettle();
+    expect(app.api.rowsFor(userId).length, 1);
+    expect(app.api.rowsFor(userId).single.item, 'Chicken');
+    expect(app.store.pendingCount, 0);
+    expect(app.store.totalEntryCount, 1);
+  });
+
+  testWidgets('expenses added with no connection sync when it returns', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+
+    // Go offline: every server call now fails the way a dropped link does.
+    app.api.offline = true;
+    app.budgets.offline = true;
+    app.incomes.offline = true;
+    app.online.add(false);
+    await tester.pumpAndSettle();
+
+    await _addExpenseThroughUi(tester, amount: '900', item: 'Chicken');
+    await _addExpenseThroughUi(tester, amount: '2500', item: 'Petrol');
+    await app.store.saveIncome(DateTime.now(), 120000);
+    await tester.pumpAndSettle();
+
+    // Everything works offline: the numbers on screen are real and local.
+    expect(app.store.totalEntryCount, 2);
+    expect(app.store.summary.total, 3400);
+    expect(app.store.monthMoney(DateTime.now()).income, 120000);
+    expect(app.store.pendingCount, 3);
+    expect(app.store.syncState, SyncState.waiting);
+    expect(app.api.rowsFor(userId), isEmpty);
+
+    // Connection returns: the queue drains by itself, no user action.
+    app.api.offline = false;
+    app.budgets.offline = false;
+    app.incomes.offline = false;
+    app.online.add(true);
+    await tester.pumpAndSettle();
+
+    expect(app.store.pendingCount, 0);
+    expect(app.store.syncState, SyncState.synced);
+    expect(app.api.rowsFor(userId).length, 2);
+    expect(app.api.rowsFor(userId).map((e) => e.item).toSet(), {
+      'Chicken',
+      'Petrol',
+    });
+    expect(app.incomes.rowsFor(userId).single.amount, 120000);
+    // No duplicates: ids were generated on the device, so the push is a replay.
+    expect(app.store.totalEntryCount, 2);
+  });
+
+  testWidgets('an offline delete removes the row on the server later', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+    app.api.seed(userId, _sampleExpenses(DateTime.now()));
+    await app.store.sync();
+    await tester.pumpAndSettle();
+    expect(app.store.totalEntryCount, 3);
+
+    app.api.offline = true;
+    app.online.add(false);
+    await tester.pumpAndSettle();
+
+    await app.store.remove('seed-2');
+    await tester.pumpAndSettle();
+    expect(app.store.totalEntryCount, 2, reason: 'gone locally straight away');
+    expect(app.api.rowsFor(userId).length, 3, reason: 'server still has it');
+
+    app.api.offline = false;
+    app.online.add(true);
+    await tester.pumpAndSettle();
+
+    expect(app.api.rowsFor(userId).length, 2);
+    expect(app.api.rowsFor(userId).any((e) => e.id == 'seed-2'), isFalse);
+    expect(app.store.pendingCount, 0);
   });
 
   testWidgets('charts and periods work on seeded data', (tester) async {
@@ -346,20 +460,24 @@ void main() {
     await app.store.refresh();
     await tester.pumpAndSettle();
 
+    await _revealText(tester, 'Spending by week');
     expect(find.text('Spending by week'), findsOneWidget);
     await _revealText(tester, 'Where it went');
     await _revealText(tester, 'Recent expenses');
-    await tester.drag(_verticalScroll, const Offset(0, 2400));
-    await tester.pumpAndSettle();
+    await _toTop(tester);
 
     await tester.tap(find.text('Week').first);
     await tester.pumpAndSettle();
+    await _revealText(tester, 'Spending by day');
     expect(find.text('Spending by day'), findsOneWidget);
 
+    await _toTop(tester);
     await tester.tap(find.text('Year').first);
     await tester.pumpAndSettle();
+    await _revealText(tester, 'Spending by month');
     expect(find.text('Spending by month'), findsOneWidget);
 
+    await _toTop(tester);
     await tester.tap(find.text('Month').first);
     await tester.pumpAndSettle();
     expect(find.text('Total spent · This month'), findsOneWidget);
@@ -592,10 +710,15 @@ void main() {
     await tester.pumpAndSettle();
 
     // Without pay there is only a prompt — savings cannot be computed.
-    expect(find.text('Add your monthly pay'), findsOneWidget);
+    expect(find.text('Add your income'), findsOneWidget);
     expect(find.text('Pay & savings'), findsNothing);
 
-    await tester.tap(find.text('Add your monthly pay'));
+    // FilledButton.icon builds a private subclass, which find.byType (exact
+    // type match) will not see — target the label instead.
+    final setIncome = find.text('Set monthly income');
+    await tester.ensureVisible(setIncome);
+    await tester.pumpAndSettle();
+    await tester.tap(setIncome);
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).first, '120000');
     await tester.pumpAndSettle();
@@ -645,6 +768,50 @@ void main() {
       isNull,
       reason: 'nothing was earned on record before the first entry',
     );
+  });
+
+  testWidgets('a single limit can be removed, and all of them reset', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+
+    await app.store.saveBudget(ExpenseCategory.groceries, 25000);
+    await app.store.saveBudget(ExpenseCategory.fuel, 8000);
+    await app.store.saveBudget(ExpenseCategory.dining, 3000);
+    await tester.pumpAndSettle();
+    expect(app.budgets.rowsFor(userId).length, 3);
+
+    await tester.tap(_tab(3));
+    await tester.pumpAndSettle();
+
+    // One limit: open it and use the spelled-out remove button.
+    await _revealText(tester, 'Groceries');
+    await tester.tap(find.text('Groceries').first);
+    await tester.pumpAndSettle();
+    final removeOne = find.text('Remove the Groceries limit');
+    await tester.ensureVisible(removeOne);
+    await tester.pumpAndSettle();
+    await tester.tap(removeOne);
+    await tester.pumpAndSettle();
+
+    expect(app.budgets.rowsFor(userId).length, 2);
+    expect(app.store.budgetFor(ExpenseCategory.groceries), isNull);
+
+    // All of them: Reset all, which asks first.
+    await _toTop(tester);
+    await tester.tap(find.text('Reset all'));
+    await tester.pumpAndSettle();
+    expect(find.text('Reset all budgets?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Reset all'));
+    await tester.pumpAndSettle();
+
+    expect(app.budgets.rowsFor(userId), isEmpty);
+    expect(app.store.budgetStatuses, isEmpty);
+    // Expenses are untouched by a budget reset.
+    expect(app.store.totalEntryCount, 0);
+    expect(find.text('No limits yet'), findsOneWidget);
   });
 
   testWidgets('dark theme renders every screen', (tester) async {

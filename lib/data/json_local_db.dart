@@ -1,0 +1,319 @@
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/budget.dart';
+import '../models/expense.dart';
+import '../models/expense_category.dart';
+import '../models/income.dart';
+import 'local_db.dart';
+
+/// Somewhere to put strings. Lets the same LocalDb logic run on preferences
+/// (web) or in memory (tests).
+abstract interface class KeyValueStore {
+  Future<String?> read(String key);
+  Future<void> write(String key, String value);
+  Future<void> remove(String key);
+}
+
+class PrefsKeyValueStore implements KeyValueStore {
+  Future<SharedPreferences> get _prefs => SharedPreferences.getInstance();
+
+  @override
+  Future<String?> read(String key) async => (await _prefs).getString(key);
+
+  @override
+  Future<void> write(String key, String value) async =>
+      (await _prefs).setString(key, value);
+
+  @override
+  Future<void> remove(String key) async => (await _prefs).remove(key);
+}
+
+class MemoryKeyValueStore implements KeyValueStore {
+  final Map<String, String> _values = {};
+
+  @override
+  Future<String?> read(String key) async => _values[key];
+
+  @override
+  Future<void> write(String key, String value) async => _values[key] = value;
+
+  @override
+  Future<void> remove(String key) async => _values.remove(key);
+}
+
+/// JSON-document implementation of [LocalDb], for platforms without SQLite
+/// (web) and for tests. Same contract, same outbox semantics — the storage
+/// medium is the only difference.
+class JsonLocalDb implements LocalDb {
+  JsonLocalDb(this._store);
+
+  final KeyValueStore _store;
+  int _nextOpId = 1;
+
+  /// Every operation here is read-modify-write on a whole JSON document, so two
+  /// overlapping calls would lose one of the changes. Sync runs concurrently
+  /// with user writes, so the calls are queued through this chain and applied
+  /// one at a time — the equivalent of SQLite's transactions.
+  Future<void> _gate = Future.value();
+
+  Future<T> _serial<T>(Future<T> Function() body) {
+    final result = _gate.then((_) => body());
+    // Swallow errors on the gate only; the caller still sees them via [result].
+    _gate = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
+  String _key(String userId, String table) => 'ldb_${table}_$userId';
+
+  Future<List<Map<String, dynamic>>> _list(String userId, String table) async {
+    final raw = await _store.read(_key(userId, table));
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return [];
+      return decoded.whereType<Map<String, dynamic>>().toList();
+    } on FormatException {
+      return [];
+    }
+  }
+
+  Future<void> _save(
+    String userId,
+    String table,
+    List<Map<String, dynamic>> rows,
+  ) => _store.write(_key(userId, table), jsonEncode(rows));
+
+  @override
+  Future<void> open() async {
+    // Nothing to open; keep the outbox ids ahead of anything already stored.
+    _nextOpId = 1;
+  }
+
+  // ------------------------------------------------------------------ reads ---
+
+  @override
+  Future<List<Expense>> readExpenses(String userId) async {
+    final rows = await _list(userId, 'expenses');
+    final out = rows.map(Expense.fromJson).whereType<Expense>().toList();
+    out.sort((a, b) {
+      final byDate = b.date.compareTo(a.date);
+      return byDate != 0 ? byDate : b.createdAt.compareTo(a.createdAt);
+    });
+    return out;
+  }
+
+  @override
+  Future<List<Budget>> readBudgets(String userId) async => (await _list(
+    userId,
+    'budgets',
+  )).map(Budget.fromJson).whereType<Budget>().toList();
+
+  @override
+  Future<List<MonthlyIncome>> readIncomes(String userId) async {
+    final out = (await _list(
+      userId,
+      'incomes',
+    )).map(MonthlyIncome.fromJson).whereType<MonthlyIncome>().toList();
+    out.sort((a, b) => a.month.compareTo(b.month));
+    return out;
+  }
+
+  // ----------------------------------------------------------------- writes ---
+
+  @override
+  Future<void> putExpense(String userId, Expense expense) =>
+      _serial(() => _putExpense(userId, expense));
+
+  Future<void> _putExpense(String userId, Expense expense) async {
+    final rows = await _list(userId, 'expenses')
+      ..removeWhere((r) => r['id'] == expense.id);
+    rows.add(expense.toJson());
+    await _save(userId, 'expenses', rows);
+  }
+
+  @override
+  Future<void> removeExpense(String userId, String id) =>
+      _serial(() => _removeExpense(userId, id));
+
+  Future<void> _removeExpense(String userId, String id) async {
+    final rows = await _list(userId, 'expenses')
+      ..removeWhere((r) => r['id'] == id);
+    await _save(userId, 'expenses', rows);
+  }
+
+  @override
+  Future<void> putBudget(String userId, Budget budget) =>
+      _serial(() => _putBudget(userId, budget));
+
+  Future<void> _putBudget(String userId, Budget budget) async {
+    final rows = await _list(userId, 'budgets')
+      ..removeWhere((r) => r['category'] == budget.category.name);
+    rows.add(budget.toJson());
+    await _save(userId, 'budgets', rows);
+  }
+
+  @override
+  Future<void> removeBudget(String userId, ExpenseCategory category) =>
+      _serial(() => _removeBudget(userId, category));
+
+  Future<void> _removeBudget(String userId, ExpenseCategory category) async {
+    final rows = await _list(userId, 'budgets')
+      ..removeWhere((r) => r['category'] == category.name);
+    await _save(userId, 'budgets', rows);
+  }
+
+  static String _monthKey(DateTime month) =>
+      '${month.year.toString().padLeft(4, '0')}-'
+      '${month.month.toString().padLeft(2, '0')}-01';
+
+  @override
+  Future<void> putIncome(String userId, MonthlyIncome income) =>
+      _serial(() => _putIncome(userId, income));
+
+  Future<void> _putIncome(String userId, MonthlyIncome income) async {
+    final key = _monthKey(income.month);
+    final rows = await _list(userId, 'incomes')
+      ..removeWhere((r) => r['month'] == key);
+    rows.add(income.toJson());
+    await _save(userId, 'incomes', rows);
+  }
+
+  @override
+  Future<void> removeIncome(String userId, DateTime month) =>
+      _serial(() => _removeIncome(userId, month));
+
+  Future<void> _removeIncome(String userId, DateTime month) async {
+    final key = _monthKey(month);
+    final rows = await _list(userId, 'incomes')
+      ..removeWhere((r) => r['month'] == key);
+    await _save(userId, 'incomes', rows);
+  }
+
+  // ------------------------------------------------------------ pull merges ---
+
+  @override
+  Future<void> replaceExpenses(
+    String userId,
+    List<Expense> rows, {
+    Set<String> keepKeys = const {},
+  }) => _serial(() => _replaceExpenses(userId, rows, keepKeys: keepKeys));
+
+  Future<void> _replaceExpenses(
+    String userId,
+    List<Expense> rows, {
+    Set<String> keepKeys = const {},
+  }) async {
+    final existing = await _list(userId, 'expenses');
+    final kept = existing
+        .where((r) => keepKeys.contains(r['id'] as String? ?? ''))
+        .toList();
+    final incoming = rows
+        .where((e) => !keepKeys.contains(e.id))
+        .map((e) => e.toJson());
+    await _save(userId, 'expenses', [...kept, ...incoming]);
+  }
+
+  @override
+  Future<void> replaceBudgets(
+    String userId,
+    List<Budget> rows, {
+    Set<String> keepKeys = const {},
+  }) => _serial(() => _replaceBudgets(userId, rows, keepKeys: keepKeys));
+
+  Future<void> _replaceBudgets(
+    String userId,
+    List<Budget> rows, {
+    Set<String> keepKeys = const {},
+  }) async {
+    final existing = await _list(userId, 'budgets');
+    final kept = existing
+        .where((r) => keepKeys.contains(r['category'] as String? ?? ''))
+        .toList();
+    final incoming = rows
+        .where((b) => !keepKeys.contains(b.category.name))
+        .map((b) => b.toJson());
+    await _save(userId, 'budgets', [...kept, ...incoming]);
+  }
+
+  @override
+  Future<void> replaceIncomes(
+    String userId,
+    List<MonthlyIncome> rows, {
+    Set<String> keepKeys = const {},
+  }) => _serial(() => _replaceIncomes(userId, rows, keepKeys: keepKeys));
+
+  Future<void> _replaceIncomes(
+    String userId,
+    List<MonthlyIncome> rows, {
+    Set<String> keepKeys = const {},
+  }) async {
+    final existing = await _list(userId, 'incomes');
+    final kept = existing
+        .where((r) => keepKeys.contains(r['month'] as String? ?? ''))
+        .toList();
+    final incoming = rows
+        .where((i) => !keepKeys.contains(_monthKey(i.month)))
+        .map((i) => i.toJson());
+    await _save(userId, 'incomes', [...kept, ...incoming]);
+  }
+
+  // ----------------------------------------------------------------- outbox ---
+
+  @override
+  Future<void> enqueue(String userId, PendingOp op) =>
+      _serial(() => _enqueue(userId, op));
+
+  Future<void> _enqueue(String userId, PendingOp op) async {
+    final rows = await _list(userId, 'outbox');
+    if (op.action == SyncAction.deleteAll) {
+      rows.removeWhere((r) => r['entity'] == op.entity.name);
+    } else if (op.key.isNotEmpty) {
+      rows.removeWhere(
+        (r) => r['entity'] == op.entity.name && r['row_key'] == op.key,
+      );
+    }
+    final highest = rows.fold<int>(
+      0,
+      (m, r) => ((r['op_id'] as num?)?.toInt() ?? 0) > m
+          ? (r['op_id'] as num).toInt()
+          : m,
+    );
+    _nextOpId = highest + 1;
+    rows.add({'op_id': _nextOpId, ...op.toRow()});
+    await _save(userId, 'outbox', rows);
+  }
+
+  @override
+  Future<List<PendingOp>> pendingOps(String userId) async {
+    final rows = await _list(userId, 'outbox')
+      ..sort(
+        (a, b) => ((a['op_id'] as num?)?.toInt() ?? 0).compareTo(
+          (b['op_id'] as num?)?.toInt() ?? 0,
+        ),
+      );
+    return rows.map(PendingOp.fromRow).toList();
+  }
+
+  @override
+  Future<void> completeOp(String userId, int opId) =>
+      _serial(() => _completeOp(userId, opId));
+
+  Future<void> _completeOp(String userId, int opId) async {
+    final rows = await _list(userId, 'outbox')
+      ..removeWhere((r) => ((r['op_id'] as num?)?.toInt() ?? 0) == opId);
+    await _save(userId, 'outbox', rows);
+  }
+
+  @override
+  Future<int> pendingCount(String userId) async =>
+      (await _list(userId, 'outbox')).length;
+
+  @override
+  Future<void> clearUser(String userId) async {
+    for (final table in ['expenses', 'budgets', 'incomes', 'outbox']) {
+      await _store.remove(_key(userId, table));
+    }
+  }
+}

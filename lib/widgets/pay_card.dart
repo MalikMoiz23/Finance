@@ -4,7 +4,6 @@ import '../core/app_theme.dart';
 import '../core/formatters.dart';
 import '../models/income.dart';
 import 'delta_badge.dart';
-import 'pressable.dart';
 import 'section_card.dart';
 
 /// Pay against spending for the month, what that leaves, and how both compare
@@ -224,6 +223,10 @@ class _Figure extends StatelessWidget {
 }
 
 /// Shown until a pay figure exists — savings cannot be computed without one.
+///
+/// A full card with a real button rather than a chevron row: this is the one
+/// thing standing between the user and savings tracking, so it has to read as an
+/// action, not as another list item.
 class _SetPayPrompt extends StatelessWidget {
   const _SetPayPrompt({required this.onEdit});
 
@@ -232,54 +235,91 @@ class _SetPayPrompt extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final viz = context.viz;
-    return Pressable(
-      onTap: onEdit,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        decoration: BoxDecoration(
-          color: viz.surface,
-          borderRadius: BorderRadius.circular(AppSizes.cardRadius),
-          border: Border.all(color: viz.hairline),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 38,
-              height: 38,
-              decoration: BoxDecoration(
-                color: viz.successText.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(12),
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 18),
+      decoration: BoxDecoration(
+        color: viz.surface,
+        borderRadius: BorderRadius.circular(AppSizes.cardRadius),
+        border: Border.all(color: viz.successText.withValues(alpha: 0.45)),
+        boxShadow: context.isDarkMode
+            ? null
+            : const [
+                BoxShadow(
+                  color: Color(0x0F0B0B0B),
+                  blurRadius: 18,
+                  offset: Offset(0, 6),
+                ),
+              ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: viz.successText.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(
+                  Icons.payments_rounded,
+                  size: 22,
+                  color: viz.successText,
+                ),
               ),
-              child: Icon(
-                Icons.payments_rounded,
-                size: 19,
-                color: viz.successText,
-              ),
-            ),
-            const SizedBox(width: 13),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Add your monthly pay',
-                    style: context.text.titleSmall?.copyWith(fontSize: 14.5),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'See what you keep each month, not just what you spend',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: context.text.bodySmall?.copyWith(
-                      color: viz.inkMuted,
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Add your income',
+                      style: context.text.titleSmall?.copyWith(fontSize: 16),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 3),
+                    Text(
+                      'Track savings, not just spending',
+                      style: context.text.bodySmall?.copyWith(
+                        color: viz.inkMuted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            'Enter what you earn each month and this card shows what you have '
+            'left after expenses, and whether you saved more than last month.',
+            style: context.text.bodySmall?.copyWith(
+              color: viz.inkSecondary,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            height: 46,
+            child: FilledButton.icon(
+              onPressed: onEdit,
+              icon: const Icon(Icons.add_rounded, size: 19),
+              label: const Text('Set monthly income'),
+              style: FilledButton.styleFrom(
+                backgroundColor: viz.successText,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                textStyle: context.text.titleSmall?.copyWith(
+                  fontSize: 15,
+                  color: Colors.white,
+                ),
               ),
             ),
-            Icon(Icons.chevron_right_rounded, size: 20, color: viz.inkMuted),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

@@ -14,6 +14,7 @@ import '../widgets/entrance.dart';
 import '../widgets/pressable.dart';
 import '../widgets/section_card.dart';
 import '../widgets/skeleton.dart';
+import 'income_sheet.dart';
 
 /// Monthly limits per category.
 ///
@@ -58,7 +59,11 @@ class BudgetsScreen extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
+          // Income belongs beside the limits: both are "what I planned", as
+          // opposed to the expense tabs which are "what happened".
+          _IncomeRow(store: store),
+          const SizedBox(height: AppSizes.gap),
           if (loadingEmpty)
             Entrance(
               index: 0,
@@ -73,6 +78,7 @@ class BudgetsScreen extends StatelessWidget {
                 child: SectionCard(
                   title: 'Where you stand',
                   subtitle: '${statuses.length} of 8 categories have a limit',
+                  trailing: _ResetAllButton(count: statuses.length),
                   child: Column(
                     children: [
                       for (var i = 0; i < statuses.length; i++) ...[
@@ -129,6 +135,163 @@ class BudgetsScreen extends StatelessWidget {
             ],
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// Clears every limit at once. Destructive, so it is worded plainly, coloured
+/// with the danger step, and confirmed before anything is deleted.
+class _ResetAllButton extends StatelessWidget {
+  const _ResetAllButton({required this.count});
+
+  final int count;
+
+  Future<void> _confirm(BuildContext context) async {
+    final store = context.read<ExpenseStore>();
+    final messenger = ScaffoldMessenger.of(context);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reset all budgets?'),
+        content: Text(
+          'This removes the monthly limit from all $count '
+          '${count == 1 ? 'category' : 'categories'}. Your expenses are not '
+          'touched — only the limits go.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: dialogContext.viz.critical,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Reset all'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    try {
+      await store.clearAllBudgets();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('All budget limits removed')),
+      );
+    } catch (error) {
+      messenger.showSnackBar(SnackBar(content: Text(describeError(error))));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    return Pressable(
+      onTap: () => _confirm(context),
+      scale: 0.95,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.restart_alt_rounded, size: 17, color: viz.critical),
+            const SizedBox(width: 4),
+            Text(
+              'Reset all',
+              style: context.text.labelLarge?.copyWith(
+                color: viz.critical,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Monthly income, with what it leaves after this month's spending.
+class _IncomeRow extends StatelessWidget {
+  const _IncomeRow({required this.store});
+
+  final ExpenseStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    final money = store.monthMoney(DateTime.now());
+    final saved = money.saved;
+
+    return Pressable(
+      onTap: () => IncomeSheet.show(context),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: viz.surface,
+          borderRadius: BorderRadius.circular(AppSizes.cardRadius),
+          border: Border.all(
+            color: money.hasIncome
+                ? viz.hairline
+                : viz.successText.withValues(alpha: 0.45),
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: viz.successText.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: Icon(
+                Icons.payments_rounded,
+                size: 20,
+                color: viz.successText,
+              ),
+            ),
+            const SizedBox(width: 13),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    money.hasIncome
+                        ? 'Monthly income'
+                        : 'Add your monthly income',
+                    style: context.text.titleSmall?.copyWith(fontSize: 14.5),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    money.hasIncome
+                        ? '${Money.format(money.income!)} · '
+                              '${money.overspent ? 'overspent' : 'saved'} '
+                              '${Money.format((saved ?? 0).abs())} so far'
+                        : 'Needed to work out what you save',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.text.bodySmall?.copyWith(
+                      color: money.overspent ? viz.critical : viz.inkMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              money.hasIncome ? 'Edit' : 'Set',
+              style: context.text.labelLarge?.copyWith(
+                color: viz.series,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            Icon(Icons.chevron_right_rounded, size: 18, color: viz.series),
+          ],
+        ),
       ),
     );
   }
@@ -413,16 +576,6 @@ class _BudgetSheetState extends State<BudgetSheet> {
                     style: context.text.titleMedium?.copyWith(fontSize: 19),
                   ),
                 ),
-                if (existing != null)
-                  IconButton(
-                    onPressed: _saving ? null : _remove,
-                    tooltip: 'Remove limit',
-                    icon: const Icon(Icons.delete_outline_rounded),
-                    style: IconButton.styleFrom(
-                      foregroundColor: viz.critical,
-                      backgroundColor: viz.critical.withValues(alpha: 0.10),
-                    ),
-                  ),
               ],
             ),
             const SizedBox(height: 6),
@@ -610,6 +763,31 @@ class _BudgetSheetState extends State<BudgetSheet> {
                       ),
               ),
             ),
+            // Spelled out rather than a bin icon: removing a limit is easy to
+            // want and was previously hard to find.
+            if (existing != null) ...[
+              const SizedBox(height: 10),
+              SizedBox(
+                height: 48,
+                child: OutlinedButton.icon(
+                  onPressed: _saving ? null : _remove,
+                  icon: const Icon(Icons.delete_outline_rounded, size: 19),
+                  label: Text('Remove the ${_category.label} limit'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: viz.critical,
+                    side: BorderSide(
+                      color: viz.critical.withValues(alpha: 0.4),
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    textStyle: context.text.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
