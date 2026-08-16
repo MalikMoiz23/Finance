@@ -160,6 +160,77 @@ class DashboardScreen extends StatelessWidget {
                     ),
             ),
           ),
+          // Projects sit at the bottom and only once one exists: they are a
+          // separate ledger, so they must never look like part of the totals
+          // above them.
+          if (store.hasProjects) ...[
+            const SizedBox(height: AppSizes.gap),
+            Entrance(
+              index: 7,
+              child: _ProjectsSummary(store: store, onOpenTab: onOpenTab),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A pointer to the other ledger. Deliberately plain — one total, the project
+/// count, and wording that says it is not part of anything above.
+class _ProjectsSummary extends StatelessWidget {
+  const _ProjectsSummary({required this.store, required this.onOpenTab});
+
+  final ExpenseStore store;
+  final TabOpener onOpenTab;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    final projects = store.projects;
+    final biggest = projects.reduce((a, b) => a.total >= b.total ? a : b);
+
+    return SectionCard(
+      title: 'Projects',
+      subtitle: 'Paid from savings · not in the figures above',
+      trailing: CardAction(
+        label: 'Open',
+        onTap: () => onOpenTab(HomeShell.projectsTab),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Text(
+                  Money.format(store.projectsTotal),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.text.titleMedium?.copyWith(
+                    fontSize: 24,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.8,
+                    color: viz.inkPrimary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${projects.length} '
+                '${projects.length == 1 ? 'project' : 'projects'}',
+                style: context.text.bodySmall?.copyWith(color: viz.inkMuted),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Biggest: ${biggest.name} · ${Money.format(biggest.total)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: context.text.bodySmall?.copyWith(color: viz.inkSecondary),
+          ),
         ],
       ),
     );

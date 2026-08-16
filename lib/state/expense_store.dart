@@ -10,6 +10,7 @@ import '../data/budget_api.dart';
 import '../data/expense_api.dart';
 import '../data/income_api.dart';
 import '../data/local_db.dart';
+import '../data/project_api.dart';
 import '../models/analytics.dart';
 import '../models/app_user.dart';
 import '../models/budget.dart';
@@ -18,6 +19,7 @@ import '../models/expense_category.dart';
 import '../models/income.dart';
 import '../models/item_catalog.dart';
 import '../models/period.dart';
+import '../models/project.dart';
 
 /// Where the local copy stands against the server.
 enum SyncState {
@@ -47,11 +49,13 @@ class ExpenseStore extends ChangeNotifier {
     required ExpenseApi api,
     required BudgetApi budgetApi,
     required IncomeApi incomeApi,
+    required ProjectApi projectApi,
     required LocalDb localDb,
     Stream<bool>? onlineChanges,
   }) : _api = api,
        _budgetApi = budgetApi,
        _incomeApi = incomeApi,
+       _projectApi = projectApi,
        _local = localDb {
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
     _summary = _compute();
@@ -74,6 +78,7 @@ class ExpenseStore extends ChangeNotifier {
   final ExpenseApi _api;
   final BudgetApi _budgetApi;
   final IncomeApi _incomeApi;
+  final ProjectApi _projectApi;
   final LocalDb _local;
   static const _uuid = Uuid();
 
@@ -82,9 +87,12 @@ class ExpenseStore extends ChangeNotifier {
   final List<Expense> _expenses = [];
   final List<Budget> _budgets = [];
   final List<MonthlyIncome> _incomes = [];
+  final List<Project> _projects = [];
+  final List<ProjectEntry> _projectEntries = [];
   Period _period = Period.month;
   late DateTime _anchor;
   late PeriodSummary _summary;
+  List<ProjectSummary> _projectSummaries = const [];
 
   String? _userId;
   bool _loading = false;
@@ -250,6 +258,190 @@ class ExpenseStore extends ChangeNotifier {
 
   bool get hasAnyIncome => _incomes.isNotEmpty;
 
+  // -------------------------------------------------------------- projects ---
+  //
+  // A separate ledger, on purpose. None of the figures above look at a project:
+  // this money left the savings that earlier months built up, so counting a
+  // Rs 92,500 brick order as March spending would make an ordinary month read
+  // as a disaster and would blow every category budget at once.
+
+  /// Every project with its entries, most recently worked on first.
+  List<ProjectSummary> get projects => _projectSummaries;
+
+  bool get hasProjects => _projectSummaries.isNotEmpty;
+
+  ProjectSummary? projectById(String id) =>
+      _projectSummaries.where((p) => p.id == id).firstOrNull;
+
+  /// Everything spent across every project, ever. Counted off the summaries so
+  /// an entry orphaned by a pull cannot inflate a total nothing displays.
+  double get projectsTotal =>
+      _projectSummaries.fold<double>(0, (sum, p) => sum + p.total);
+
+  int get projectEntryCount =>
+      _projectSummaries.fold<int>(0, (sum, p) => sum + p.entryCount);
+
+  /// Creates a project and returns it, so the caller can open it straight away.
+  Future<Project> createProject({
+    required String name,
+    double? estimate,
+    String note = '',
+    DateTime? startedOn,
+  }) async {
+    final project = Project(
+      // Generated here, not by the server, so a project started offline keeps
+      // its identity — and its entries keep pointing at it — once it syncs.
+      id: _uuid.v4(),
+      name: name.trim(),
+      estimate: estimate != null && estimate > 0 ? estimate : null,
+      note: note.trim(),
+      startedOn: startedOn,
+    );
+    await saveProject(project);
+    return project;
+  }
+
+  Future<void> saveProject(Project project) async {
+    final userId = _requireUser();
+    await _local.putProject(userId, project);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.project,
+        action: SyncAction.upsert,
+        key: project.id,
+        payload: project.toJson(),
+      ),
+    );
+    final index = _projects.indexWhere((p) => p.id == project.id);
+    if (index == -1) {
+      _projects.add(project);
+    } else {
+      _projects[index] = project;
+    }
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  /// Deletes a project and everything logged against it.
+  Future<void> deleteProject(String projectId) async {
+    final userId = _requireUser();
+    final entryIds = _projectEntries
+        .where((e) => e.projectId == projectId)
+        .map((e) => e.id)
+        .toSet();
+
+    await _local.removeProject(userId, projectId);
+    // Those entries are gone. A queued insert for one of them would be pushed
+    // after the project row is deleted and rejected by the foreign key, so the
+    // op is thrown away rather than left to poison the queue. A queued *project*
+    // op needs no such care: the delete below replaces it by key.
+    await _local.dropQueued(userId, SyncEntity.projectEntry, entryIds);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.project,
+        action: SyncAction.delete,
+        key: projectId,
+        payload: {'id': projectId},
+      ),
+    );
+
+    _projects.removeWhere((p) => p.id == projectId);
+    _projectEntries.removeWhere((e) => e.projectId == projectId);
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  /// Adds a line to a project.
+  ///
+  /// Pass [quantity] and [rate] together for a measured buy — 5,000 bricks at
+  /// Rs 18.50 — and the amount is recomputed from them. Pass neither for a lump
+  /// sum, where [amount] is what was paid.
+  Future<ProjectEntry> addProjectEntry({
+    required String projectId,
+    required String stage,
+    required double amount,
+    required DateTime date,
+    double? quantity,
+    String unit = '',
+    double? rate,
+    String note = '',
+  }) async {
+    final measured = quantity != null && rate != null;
+    final entry = ProjectEntry(
+      id: _uuid.v4(),
+      projectId: projectId,
+      stage: stage.trim(),
+      // Recomputed rather than taken on trust, so the stored amount can never
+      // disagree with the quantity and rate shown beside it.
+      amount: measured ? ProjectEntry.totalOf(quantity, rate) : amount,
+      quantity: measured ? quantity : null,
+      unit: measured ? unit.trim() : '',
+      rate: measured ? rate : null,
+      date: date,
+      note: note.trim(),
+    );
+    await saveProjectEntry(entry);
+    return entry;
+  }
+
+  Future<void> saveProjectEntry(ProjectEntry entry) async {
+    final userId = _requireUser();
+    await _local.putProjectEntry(userId, entry);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.projectEntry,
+        action: SyncAction.upsert,
+        key: entry.id,
+        payload: entry.toJson(),
+      ),
+    );
+    final index = _projectEntries.indexWhere((e) => e.id == entry.id);
+    if (index == -1) {
+      _projectEntries.add(entry);
+    } else {
+      _projectEntries[index] = entry;
+    }
+    _sortProjectEntries();
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  Future<void> deleteProjectEntry(String entryId) async {
+    final userId = _requireUser();
+    await _local.removeProjectEntry(userId, entryId);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.projectEntry,
+        action: SyncAction.delete,
+        key: entryId,
+        payload: {'id': entryId},
+      ),
+    );
+    _projectEntries.removeWhere((e) => e.id == entryId);
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  /// Undo for a deleted entry: written back as a new row.
+  Future<void> restoreProjectEntry(ProjectEntry entry) => addProjectEntry(
+    projectId: entry.projectId,
+    stage: entry.stage,
+    amount: entry.amount,
+    date: entry.date,
+    quantity: entry.quantity,
+    unit: entry.unit,
+    rate: entry.rate,
+    note: entry.note,
+  );
+
   // --------------------------------------------------------------- items ---
 
   List<ItemSuggestion> suggestItems(String query, {int limit = 6}) =>
@@ -268,6 +460,8 @@ class ExpenseStore extends ChangeNotifier {
       _expenses.clear();
       _budgets.clear();
       _incomes.clear();
+      _projects.clear();
+      _projectEntries.clear();
       _loading = false;
       _pending = 0;
       _syncError = null;
@@ -280,6 +474,8 @@ class ExpenseStore extends ChangeNotifier {
     _expenses.clear();
     _budgets.clear();
     _incomes.clear();
+    _projects.clear();
+    _projectEntries.clear();
     _syncError = null;
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
 
@@ -292,6 +488,8 @@ class ExpenseStore extends ChangeNotifier {
     final expenses = await _local.readExpenses(userId);
     final budgets = await _local.readBudgets(userId);
     final incomes = await _local.readIncomes(userId);
+    final projects = await _local.readProjects(userId);
+    final projectEntries = await _local.readProjectEntries(userId);
     final pending = await _local.pendingCount(userId);
     if (_userId != userId) return;
     _expenses
@@ -303,7 +501,14 @@ class ExpenseStore extends ChangeNotifier {
     _incomes
       ..clear()
       ..addAll(incomes);
+    _projects
+      ..clear()
+      ..addAll(projects);
+    _projectEntries
+      ..clear()
+      ..addAll(projectEntries);
     _sort();
+    _sortProjectEntries();
     _pending = pending;
     _refresh();
   }
@@ -355,7 +560,16 @@ class ExpenseStore extends ChangeNotifier {
   /// Drains the outbox oldest-first. Stops at the first failure so ordering is
   /// preserved and nothing is dropped.
   Future<void> _pushPending(String userId) async {
-    final ops = await _local.pendingOps(userId);
+    final queued = await _local.pendingOps(userId);
+    // Parents before children. Collapsing a repeated edit moves that row's op
+    // to the back of the queue, so editing a project *after* adding an entry to
+    // it would otherwise push the entry first — and the server would reject it,
+    // because the project it points at does not exist there yet. Everything
+    // else keeps its queued order.
+    final ops = [
+      ...queued.where((o) => o.entity == SyncEntity.project),
+      ...queued.where((o) => o.entity != SyncEntity.project),
+    ];
     for (final op in ops) {
       if (_userId != userId) return;
       switch ((op.entity, op.action)) {
@@ -384,6 +598,19 @@ class ExpenseStore extends ChangeNotifier {
           await _incomeApi.remove(op.month);
         case (SyncEntity.income, SyncAction.deleteAll):
           break; // no such operation for pay
+        case (SyncEntity.project, SyncAction.upsert):
+          final project = op.project;
+          if (project != null) await _projectApi.upsertProject(project);
+        case (SyncEntity.project, SyncAction.delete):
+          await _projectApi.deleteProject(op.key);
+        case (SyncEntity.projectEntry, SyncAction.upsert):
+          final entry = op.projectEntry;
+          if (entry != null) await _projectApi.upsertEntry(entry);
+        case (SyncEntity.projectEntry, SyncAction.delete):
+          await _projectApi.deleteEntry(op.key);
+        case (SyncEntity.project, SyncAction.deleteAll):
+        case (SyncEntity.projectEntry, SyncAction.deleteAll):
+          break; // projects are removed one at a time, cascading their entries
       }
       await _local.completeOp(userId, op.id);
       _pending = await _local.pendingCount(userId);
@@ -397,6 +624,8 @@ class ExpenseStore extends ChangeNotifier {
     final remoteExpenses = await _api.fetchAll();
     final remoteBudgets = await _budgetApi.fetchAll();
     final remoteIncomes = await _incomeApi.fetchAll();
+    final remoteProjects = await _projectApi.fetchProjects();
+    final remoteEntries = await _projectApi.fetchEntries();
     if (_userId != userId) return;
 
     final ops = await _local.pendingOps(userId);
@@ -419,6 +648,18 @@ class ExpenseStore extends ChangeNotifier {
       userId,
       remoteIncomes,
       keepKeys: keys(SyncEntity.income),
+    );
+    // Projects before their entries, so the local copy is never briefly a set
+    // of lines with nothing to belong to.
+    await _local.replaceProjects(
+      userId,
+      remoteProjects,
+      keepKeys: keys(SyncEntity.project),
+    );
+    await _local.replaceProjectEntries(
+      userId,
+      remoteEntries,
+      keepKeys: keys(SyncEntity.projectEntry),
     );
     await _loadFromLocal(userId);
   }
@@ -697,6 +938,13 @@ class ExpenseStore extends ChangeNotifier {
     });
   }
 
+  void _sortProjectEntries() {
+    _projectEntries.sort((a, b) {
+      final byDate = b.date.compareTo(a.date);
+      return byDate != 0 ? byDate : b.createdAt.compareTo(a.createdAt);
+    });
+  }
+
   PeriodSummary _compute() => Analytics.summarize(
     all: _expenses,
     period: _period,
@@ -704,8 +952,35 @@ class ExpenseStore extends ChangeNotifier {
     now: DateTime.now(),
   );
 
+  /// Pairs each project with its entries. Built once per change rather than per
+  /// `build`, the same way the period summary is.
+  List<ProjectSummary> _computeProjects() {
+    if (_projects.isEmpty) return const [];
+    final byProject = <String, List<ProjectEntry>>{};
+    for (final entry in _projectEntries) {
+      byProject.putIfAbsent(entry.projectId, () => []).add(entry);
+    }
+    final summaries = [
+      for (final project in _projects)
+        ProjectSummary(
+          project: project,
+          entries: byProject[project.id] ?? const [],
+        ),
+    ];
+    // Most recently worked on first — the one being built is the one you open.
+    summaries.sort((a, b) {
+      final aWhen = a.lastEntryDate ?? a.project.startedOn;
+      final bWhen = b.lastEntryDate ?? b.project.startedOn;
+      final byWhen = bWhen.compareTo(aWhen);
+      if (byWhen != 0) return byWhen;
+      return b.project.createdAt.compareTo(a.project.createdAt);
+    });
+    return summaries;
+  }
+
   void _refresh() {
     _summary = _compute();
+    _projectSummaries = _computeProjects();
     if (!_disposed) notifyListeners();
   }
 

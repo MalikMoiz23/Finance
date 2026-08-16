@@ -4,11 +4,13 @@ import 'package:finance/data/auth_gateway.dart';
 import 'package:finance/data/budget_api.dart';
 import 'package:finance/data/expense_api.dart';
 import 'package:finance/data/income_api.dart';
+import 'package:finance/data/project_api.dart';
 import 'package:finance/models/app_user.dart';
 import 'package:finance/models/budget.dart';
 import 'package:finance/models/income.dart';
 import 'package:finance/models/expense.dart';
 import 'package:finance/models/expense_category.dart';
+import 'package:finance/models/project.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show AuthException;
 
 /// In-memory stand-ins for Supabase, so the widget tests exercise the real
@@ -283,5 +285,99 @@ class FakeIncomeApi implements IncomeApi {
     _guard(write: true);
     final key = _monthOf(month);
     (_rows[_userId] ?? []).removeWhere((i) => i.month == key);
+  }
+}
+
+/// Projects and their entries per user id.
+///
+/// Enforces the server's foreign key: an entry whose project is not there is
+/// rejected, and deleting a project takes its entries with it. Without that the
+/// tests would happily pass on a queue ordering Postgres would refuse.
+class FakeProjectApi implements ProjectApi {
+  FakeProjectApi(this._auth);
+
+  final FakeAuthGateway _auth;
+  final Map<String, List<Project>> _projects = {};
+  final Map<String, List<ProjectEntry>> _entries = {};
+
+  bool offline = false;
+  bool failNextWrite = false;
+
+  String get _userId {
+    final id = _auth.currentUser?.id;
+    if (id == null) throw StateError('Not signed in');
+    return id;
+  }
+
+  List<Project> projectsFor(String userId) =>
+      List.unmodifiable(_projects[userId] ?? []);
+
+  List<ProjectEntry> entriesFor(String userId) =>
+      List.unmodifiable(_entries[userId] ?? []);
+
+  void _guard({bool write = false}) {
+    if (offline) throw Exception('ClientException: Failed host lookup');
+    if (write && failNextWrite) {
+      failNextWrite = false;
+      throw Exception('ClientException: connection closed');
+    }
+  }
+
+  @override
+  Future<List<Project>> fetchProjects() async {
+    _guard();
+    return [...?_projects[_userId]];
+  }
+
+  @override
+  Future<List<ProjectEntry>> fetchEntries() async {
+    _guard();
+    return [...?_entries[_userId]];
+  }
+
+  @override
+  Future<void> upsertProject(Project project) async {
+    _guard(write: true);
+    final rows = _projects.putIfAbsent(_userId, () => []);
+    final index = rows.indexWhere((p) => p.id == project.id);
+    if (index == -1) {
+      rows.add(project);
+    } else {
+      rows[index] = project;
+    }
+  }
+
+  @override
+  Future<void> deleteProject(String id) async {
+    _guard(write: true);
+    (_projects[_userId] ?? []).removeWhere((p) => p.id == id);
+    // `on delete cascade` on project_entries.project_id.
+    (_entries[_userId] ?? []).removeWhere((e) => e.projectId == id);
+  }
+
+  @override
+  Future<void> upsertEntry(ProjectEntry entry) async {
+    _guard(write: true);
+    final projects = _projects[_userId] ?? const <Project>[];
+    if (!projects.any((p) => p.id == entry.projectId)) {
+      // What Postgres answers with: 23503, foreign key violation.
+      throw Exception(
+        'PostgrestException: insert or update on table "project_entries" '
+        'violates foreign key constraint',
+      );
+    }
+    final rows = _entries.putIfAbsent(_userId, () => []);
+    final index = rows.indexWhere((e) => e.id == entry.id);
+    if (index == -1) {
+      rows.add(entry);
+    } else {
+      rows[index] = entry;
+    }
+  }
+
+  @override
+  Future<void> deleteEntry(String id) async {
+    _guard(write: true);
+    (_entries[_userId] ?? []).removeWhere((e) => e.id == id);
   }
 }

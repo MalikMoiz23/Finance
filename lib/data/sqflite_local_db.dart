@@ -4,6 +4,7 @@ import '../models/budget.dart';
 import '../models/expense.dart';
 import '../models/expense_category.dart';
 import '../models/income.dart';
+import '../models/project.dart';
 import 'local_db.dart';
 
 /// SQLite copy of the account's data, plus the outbox. Used on Android, iOS and
@@ -20,14 +21,25 @@ class SqfliteLocalDb implements LocalDb {
     return db;
   }
 
+  /// Bumped whenever the tables below change. Every version needs a matching
+  /// branch in [_upgradeTo], or an existing install breaks on the next launch.
+  static const schemaVersion = 2;
+
   @override
   Future<void> open() async {
     if (_db != null) return;
     _db = await openDatabase(
       // A relative name lands in the platform's databases directory.
       fileName,
-      version: 1,
+      version: schemaVersion,
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
+      onUpgrade: (db, from, to) async {
+        // Runs on a device that already has data. Each step is additive, so
+        // nothing stored offline is lost on the way up.
+        for (var version = from + 1; version <= to; version++) {
+          await _upgradeTo(db, version);
+        }
+      },
       onCreate: (db, _) async {
         final batch = db.batch();
         batch.execute('''
@@ -75,10 +87,67 @@ class SqfliteLocalDb implements LocalDb {
           )
         ''');
         batch.execute('CREATE INDEX outbox_user ON outbox (user_id, op_id)');
+        for (final statement in _v2) {
+          batch.execute(statement);
+        }
         await batch.commit(noResult: true);
       },
     );
   }
+
+  static Future<void> _upgradeTo(Database db, int version) async {
+    switch (version) {
+      case 2:
+        // Projects: the separate ledger for one-off spending paid from savings.
+        final batch = db.batch();
+        for (final statement in _v2) {
+          batch.execute(statement);
+        }
+        await batch.commit(noResult: true);
+    }
+  }
+
+  /// Added in schema version 2. Written once and used by both [_upgradeTo] and
+  /// the fresh-install path, so a new device and an upgraded one end up with
+  /// byte-identical tables.
+  ///
+  /// `project_entries` carries no SQL foreign key to `projects`, on purpose.
+  /// Every write here is `INSERT OR REPLACE`, and with a cascading key SQLite
+  /// treats the replace as a delete — re-saving a project would silently take
+  /// its entries with it. The cascade lives in [removeProject] instead, where
+  /// it only fires when a project is genuinely deleted.
+  static const _v2 = <String>[
+    '''
+    CREATE TABLE projects (
+      user_id    TEXT NOT NULL,
+      id         TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      estimate   REAL,
+      note       TEXT NOT NULL DEFAULT '',
+      started_on TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, id)
+    )
+    ''',
+    '''
+    CREATE TABLE project_entries (
+      user_id    TEXT NOT NULL,
+      id         TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      stage      TEXT NOT NULL DEFAULT '',
+      amount     REAL NOT NULL,
+      quantity   REAL,
+      unit       TEXT NOT NULL DEFAULT '',
+      rate       REAL,
+      spent_on   TEXT NOT NULL,
+      note       TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, id)
+    )
+    ''',
+    'CREATE INDEX project_entries_project '
+        'ON project_entries (user_id, project_id, spent_on DESC)',
+  ];
 
   // ------------------------------------------------------------------ reads ---
 
@@ -130,12 +199,56 @@ class SqfliteLocalDb implements LocalDb {
         .toList();
   }
 
+  @override
+  Future<List<Project>> readProjects(String userId) async {
+    final rows = await _database.query(
+      'projects',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      orderBy: 'started_on DESC, created_at DESC',
+    );
+    return rows.map(_projectFrom).toList();
+  }
+
+  @override
+  Future<List<ProjectEntry>> readProjectEntries(String userId) async {
+    final rows = await _database.query(
+      'project_entries',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      orderBy: 'spent_on DESC, created_at DESC',
+    );
+    return rows.map(_entryFrom).toList();
+  }
+
   static Expense _expenseFrom(Map<String, Object?> r) => Expense(
     id: r['id'] as String,
     amount: (r['amount'] as num).toDouble(),
     category: ExpenseCategory.fromName(r['category'] as String),
     date: DateTime.parse(r['spent_on'] as String),
     item: r['item'] as String? ?? '',
+    note: r['note'] as String? ?? '',
+    createdAt: DateTime.parse(r['created_at'] as String),
+  );
+
+  static Project _projectFrom(Map<String, Object?> r) => Project(
+    id: r['id'] as String,
+    name: r['name'] as String,
+    estimate: (r['estimate'] as num?)?.toDouble(),
+    note: r['note'] as String? ?? '',
+    startedOn: DateTime.parse(r['started_on'] as String),
+    createdAt: DateTime.parse(r['created_at'] as String),
+  );
+
+  static ProjectEntry _entryFrom(Map<String, Object?> r) => ProjectEntry(
+    id: r['id'] as String,
+    projectId: r['project_id'] as String,
+    stage: r['stage'] as String? ?? '',
+    amount: (r['amount'] as num).toDouble(),
+    quantity: (r['quantity'] as num?)?.toDouble(),
+    unit: r['unit'] as String? ?? '',
+    rate: (r['rate'] as num?)?.toDouble(),
+    date: DateTime.parse(r['spent_on'] as String),
     note: r['note'] as String? ?? '',
     createdAt: DateTime.parse(r['created_at'] as String),
   );
@@ -209,6 +322,73 @@ class SqfliteLocalDb implements LocalDb {
       'incomes',
       where: 'user_id = ? AND month = ?',
       whereArgs: [userId, DateTime(month.year, month.month).toIso8601String()],
+    );
+  }
+
+  Map<String, Object?> _projectRow(String userId, Project p) => {
+    'user_id': userId,
+    'id': p.id,
+    'name': p.name,
+    'estimate': p.estimate,
+    'note': p.note,
+    'started_on': p.startedOn.toIso8601String(),
+    'created_at': p.createdAt.toIso8601String(),
+  };
+
+  Map<String, Object?> _entryRow(String userId, ProjectEntry e) => {
+    'user_id': userId,
+    'id': e.id,
+    'project_id': e.projectId,
+    'stage': e.stage,
+    'amount': e.amount,
+    'quantity': e.quantity,
+    'unit': e.unit,
+    'rate': e.rate,
+    'spent_on': e.date.toIso8601String(),
+    'note': e.note,
+    'created_at': e.createdAt.toIso8601String(),
+  };
+
+  @override
+  Future<void> putProject(String userId, Project project) async {
+    await _database.insert(
+      'projects',
+      _projectRow(userId, project),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  @override
+  Future<void> removeProject(String userId, String projectId) async {
+    await _database.transaction((txn) async {
+      await txn.delete(
+        'project_entries',
+        where: 'user_id = ? AND project_id = ?',
+        whereArgs: [userId, projectId],
+      );
+      await txn.delete(
+        'projects',
+        where: 'user_id = ? AND id = ?',
+        whereArgs: [userId, projectId],
+      );
+    });
+  }
+
+  @override
+  Future<void> putProjectEntry(String userId, ProjectEntry entry) async {
+    await _database.insert(
+      'project_entries',
+      _entryRow(userId, entry),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  @override
+  Future<void> removeProjectEntry(String userId, String entryId) async {
+    await _database.delete(
+      'project_entries',
+      where: 'user_id = ? AND id = ?',
+      whereArgs: [userId, entryId],
     );
   }
 
@@ -293,6 +473,72 @@ class SqfliteLocalDb implements LocalDb {
     });
   }
 
+  @override
+  Future<void> replaceProjects(
+    String userId,
+    List<Project> rows, {
+    Set<String> keepKeys = const {},
+  }) async {
+    await _database.transaction((txn) async {
+      final existing = await txn.query(
+        'projects',
+        columns: ['id'],
+        where: 'user_id = ?',
+        whereArgs: [userId],
+      );
+      for (final row in existing) {
+        final id = row['id'] as String;
+        if (keepKeys.contains(id)) continue;
+        await txn.delete(
+          'projects',
+          where: 'user_id = ? AND id = ?',
+          whereArgs: [userId, id],
+        );
+      }
+      for (final project in rows) {
+        if (keepKeys.contains(project.id)) continue;
+        await txn.insert(
+          'projects',
+          _projectRow(userId, project),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+  }
+
+  @override
+  Future<void> replaceProjectEntries(
+    String userId,
+    List<ProjectEntry> rows, {
+    Set<String> keepKeys = const {},
+  }) async {
+    await _database.transaction((txn) async {
+      final existing = await txn.query(
+        'project_entries',
+        columns: ['id'],
+        where: 'user_id = ?',
+        whereArgs: [userId],
+      );
+      for (final row in existing) {
+        final id = row['id'] as String;
+        if (keepKeys.contains(id)) continue;
+        await txn.delete(
+          'project_entries',
+          where: 'user_id = ? AND id = ?',
+          whereArgs: [userId, id],
+        );
+      }
+      for (final entry in rows) {
+        if (keepKeys.contains(entry.id)) continue;
+        await txn.insert(
+          'project_entries',
+          _entryRow(userId, entry),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+    });
+  }
+
   // ----------------------------------------------------------------- outbox ---
 
   @override
@@ -346,9 +592,31 @@ class SqfliteLocalDb implements LocalDb {
   }
 
   @override
+  Future<void> dropQueued(
+    String userId,
+    SyncEntity entity,
+    Set<String> keys,
+  ) async {
+    if (keys.isEmpty) return;
+    final slots = List.filled(keys.length, '?').join(', ');
+    await _database.delete(
+      'outbox',
+      where: 'user_id = ? AND entity = ? AND row_key IN ($slots)',
+      whereArgs: [userId, entity.name, ...keys],
+    );
+  }
+
+  @override
   Future<void> clearUser(String userId) async {
     await _database.transaction((txn) async {
-      for (final table in ['expenses', 'budgets', 'incomes', 'outbox']) {
+      for (final table in [
+        'expenses',
+        'budgets',
+        'incomes',
+        'projects',
+        'project_entries',
+        'outbox',
+      ]) {
         await txn.delete(table, where: 'user_id = ?', whereArgs: [userId]);
       }
     });

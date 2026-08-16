@@ -4,9 +4,10 @@ import '../models/budget.dart';
 import '../models/expense.dart';
 import '../models/expense_category.dart';
 import '../models/income.dart';
+import '../models/project.dart';
 
 /// Which table a queued change belongs to.
-enum SyncEntity { expense, budget, income }
+enum SyncEntity { expense, budget, income, project, projectEntry }
 
 /// What the queued change does.
 enum SyncAction { upsert, delete, deleteAll }
@@ -45,6 +46,12 @@ class PendingOp {
 
   MonthlyIncome? get income =>
       entity == SyncEntity.income ? MonthlyIncome.fromJson(payload) : null;
+
+  Project? get project =>
+      entity == SyncEntity.project ? Project.fromJson(payload) : null;
+
+  ProjectEntry? get projectEntry =>
+      entity == SyncEntity.projectEntry ? ProjectEntry.fromJson(payload) : null;
 
   ExpenseCategory get category =>
       ExpenseCategory.fromName(payload['category'] as String? ?? 'other');
@@ -88,6 +95,8 @@ abstract interface class LocalDb {
   Future<List<Expense>> readExpenses(String userId);
   Future<List<Budget>> readBudgets(String userId);
   Future<List<MonthlyIncome>> readIncomes(String userId);
+  Future<List<Project>> readProjects(String userId);
+  Future<List<ProjectEntry>> readProjectEntries(String userId);
 
   /// Applies a change locally. Used both for the user's own edits and for rows
   /// arriving from a pull.
@@ -97,6 +106,13 @@ abstract interface class LocalDb {
   Future<void> removeBudget(String userId, ExpenseCategory category);
   Future<void> putIncome(String userId, MonthlyIncome income);
   Future<void> removeIncome(String userId, DateTime month);
+  Future<void> putProject(String userId, Project project);
+
+  /// Deletes the project **and every entry belonging to it**, matching the
+  /// cascade on the server so the two copies cannot disagree.
+  Future<void> removeProject(String userId, String projectId);
+  Future<void> putProjectEntry(String userId, ProjectEntry entry);
+  Future<void> removeProjectEntry(String userId, String entryId);
 
   /// Replaces the local copy of a table with what the server just returned,
   /// while leaving rows named in [keepKeys] alone — those have unsynced edits
@@ -116,6 +132,16 @@ abstract interface class LocalDb {
     List<MonthlyIncome> rows, {
     Set<String> keepKeys,
   });
+  Future<void> replaceProjects(
+    String userId,
+    List<Project> rows, {
+    Set<String> keepKeys,
+  });
+  Future<void> replaceProjectEntries(
+    String userId,
+    List<ProjectEntry> rows, {
+    Set<String> keepKeys,
+  });
 
   /// Queues a change for Supabase. A newer op for the same row replaces an
   /// older queued one, so a row edited five times offline pushes once.
@@ -123,6 +149,13 @@ abstract interface class LocalDb {
   Future<List<PendingOp>> pendingOps(String userId);
   Future<void> completeOp(String userId, int opId);
   Future<int> pendingCount(String userId);
+
+  /// Throws away queued ops for rows that no longer exist.
+  ///
+  /// Deleting a project is the case that needs it: its entries go too, and a
+  /// queued *insert* for one of them would otherwise be pushed after the
+  /// project row is gone and be rejected by the foreign key.
+  Future<void> dropQueued(String userId, SyncEntity entity, Set<String> keys);
 
   /// Everything belonging to this user, including the outbox.
   Future<void> clearUser(String userId);

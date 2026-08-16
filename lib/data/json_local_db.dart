@@ -6,6 +6,7 @@ import '../models/budget.dart';
 import '../models/expense.dart';
 import '../models/expense_category.dart';
 import '../models/income.dart';
+import '../models/project.dart';
 import 'local_db.dart';
 
 /// Somewhere to put strings. Lets the same LocalDb logic run on preferences
@@ -120,6 +121,32 @@ class JsonLocalDb implements LocalDb {
     return out;
   }
 
+  @override
+  Future<List<Project>> readProjects(String userId) async {
+    final out = (await _list(
+      userId,
+      'projects',
+    )).map(Project.fromJson).whereType<Project>().toList();
+    out.sort((a, b) {
+      final byStart = b.startedOn.compareTo(a.startedOn);
+      return byStart != 0 ? byStart : b.createdAt.compareTo(a.createdAt);
+    });
+    return out;
+  }
+
+  @override
+  Future<List<ProjectEntry>> readProjectEntries(String userId) async {
+    final out = (await _list(
+      userId,
+      'project_entries',
+    )).map(ProjectEntry.fromJson).whereType<ProjectEntry>().toList();
+    out.sort((a, b) {
+      final byDate = b.date.compareTo(a.date);
+      return byDate != 0 ? byDate : b.createdAt.compareTo(a.createdAt);
+    });
+    return out;
+  }
+
   // ----------------------------------------------------------------- writes ---
 
   @override
@@ -191,6 +218,53 @@ class JsonLocalDb implements LocalDb {
     await _save(userId, 'incomes', rows);
   }
 
+  @override
+  Future<void> putProject(String userId, Project project) =>
+      _serial(() => _putProject(userId, project));
+
+  Future<void> _putProject(String userId, Project project) async {
+    final rows = await _list(userId, 'projects')
+      ..removeWhere((r) => r['id'] == project.id);
+    rows.add(project.toJson());
+    await _save(userId, 'projects', rows);
+  }
+
+  @override
+  Future<void> removeProject(String userId, String projectId) =>
+      _serial(() => _removeProject(userId, projectId));
+
+  Future<void> _removeProject(String userId, String projectId) async {
+    final projects = await _list(userId, 'projects')
+      ..removeWhere((r) => r['id'] == projectId);
+    await _save(userId, 'projects', projects);
+    // Same cascade the SQLite side does by hand, for the same reason: an entry
+    // whose project is gone would never be reachable or countable again.
+    final entries = await _list(userId, 'project_entries')
+      ..removeWhere((r) => r['project_id'] == projectId);
+    await _save(userId, 'project_entries', entries);
+  }
+
+  @override
+  Future<void> putProjectEntry(String userId, ProjectEntry entry) =>
+      _serial(() => _putProjectEntry(userId, entry));
+
+  Future<void> _putProjectEntry(String userId, ProjectEntry entry) async {
+    final rows = await _list(userId, 'project_entries')
+      ..removeWhere((r) => r['id'] == entry.id);
+    rows.add(entry.toJson());
+    await _save(userId, 'project_entries', rows);
+  }
+
+  @override
+  Future<void> removeProjectEntry(String userId, String entryId) =>
+      _serial(() => _removeProjectEntry(userId, entryId));
+
+  Future<void> _removeProjectEntry(String userId, String entryId) async {
+    final rows = await _list(userId, 'project_entries')
+      ..removeWhere((r) => r['id'] == entryId);
+    await _save(userId, 'project_entries', rows);
+  }
+
   // ------------------------------------------------------------ pull merges ---
 
   @override
@@ -259,6 +333,50 @@ class JsonLocalDb implements LocalDb {
     await _save(userId, 'incomes', [...kept, ...incoming]);
   }
 
+  @override
+  Future<void> replaceProjects(
+    String userId,
+    List<Project> rows, {
+    Set<String> keepKeys = const {},
+  }) => _serial(() => _replaceProjects(userId, rows, keepKeys: keepKeys));
+
+  Future<void> _replaceProjects(
+    String userId,
+    List<Project> rows, {
+    Set<String> keepKeys = const {},
+  }) async {
+    final existing = await _list(userId, 'projects');
+    final kept = existing
+        .where((r) => keepKeys.contains(r['id'] as String? ?? ''))
+        .toList();
+    final incoming = rows
+        .where((p) => !keepKeys.contains(p.id))
+        .map((p) => p.toJson());
+    await _save(userId, 'projects', [...kept, ...incoming]);
+  }
+
+  @override
+  Future<void> replaceProjectEntries(
+    String userId,
+    List<ProjectEntry> rows, {
+    Set<String> keepKeys = const {},
+  }) => _serial(() => _replaceProjectEntries(userId, rows, keepKeys: keepKeys));
+
+  Future<void> _replaceProjectEntries(
+    String userId,
+    List<ProjectEntry> rows, {
+    Set<String> keepKeys = const {},
+  }) async {
+    final existing = await _list(userId, 'project_entries');
+    final kept = existing
+        .where((r) => keepKeys.contains(r['id'] as String? ?? ''))
+        .toList();
+    final incoming = rows
+        .where((e) => !keepKeys.contains(e.id))
+        .map((e) => e.toJson());
+    await _save(userId, 'project_entries', [...kept, ...incoming]);
+  }
+
   // ----------------------------------------------------------------- outbox ---
 
   @override
@@ -311,8 +429,34 @@ class JsonLocalDb implements LocalDb {
       (await _list(userId, 'outbox')).length;
 
   @override
+  Future<void> dropQueued(String userId, SyncEntity entity, Set<String> keys) =>
+      _serial(() => _dropQueued(userId, entity, keys));
+
+  Future<void> _dropQueued(
+    String userId,
+    SyncEntity entity,
+    Set<String> keys,
+  ) async {
+    if (keys.isEmpty) return;
+    final rows = await _list(userId, 'outbox')
+      ..removeWhere(
+        (r) =>
+            r['entity'] == entity.name &&
+            keys.contains(r['row_key'] as String? ?? ''),
+      );
+    await _save(userId, 'outbox', rows);
+  }
+
+  @override
   Future<void> clearUser(String userId) async {
-    for (final table in ['expenses', 'budgets', 'incomes', 'outbox']) {
+    for (final table in [
+      'expenses',
+      'budgets',
+      'incomes',
+      'projects',
+      'project_entries',
+      'outbox',
+    ]) {
       await _store.remove(_key(userId, table));
     }
   }

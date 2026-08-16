@@ -10,6 +10,7 @@ import 'data/expense_api.dart';
 import 'data/income_api.dart';
 import 'data/local_db_factory.dart';
 import 'data/local_prefs.dart';
+import 'data/project_api.dart';
 import 'state/auth_controller.dart';
 import 'state/expense_store.dart';
 import 'state/theme_controller.dart';
@@ -46,6 +47,7 @@ Future<void> main() async {
             api: SupabaseExpenseApi(client),
             budgetApi: SupabaseBudgetApi(client),
             incomeApi: SupabaseIncomeApi(client),
+            projectApi: SupabaseProjectApi(client),
             localDb: createLocalDb(),
           ),
         ),

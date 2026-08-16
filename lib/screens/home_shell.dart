@@ -12,12 +12,17 @@ import 'dashboard_screen.dart';
 import 'expense_editor_sheet.dart';
 import 'expenses_screen.dart';
 import 'insights_screen.dart';
+import 'projects_screen.dart';
 
 /// Lets a card deep-link to another tab ("See all" -> Expenses).
 typedef TabOpener = void Function(int index);
 
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
+
+  /// Index of the Projects tab. Cards elsewhere deep-link to it, and the button
+  /// there starts a project instead of adding a daily expense.
+  static const projectsTab = 4;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -105,25 +110,40 @@ class _HomeShellState extends State<HomeShell> {
               const _Keep(child: ScreenIntro(child: InsightsScreen())),
               const _Keep(child: ExpensesScreen()),
               const _Keep(child: ScreenIntro(child: BudgetsScreen())),
+              const _Keep(child: ScreenIntro(child: ProjectsScreen())),
             ],
           ),
         ),
-        // Long-press repeats the last expense outright — for the things bought
-        // every day, that is the whole entry in one gesture.
-        floatingActionButton: GestureDetector(
-          onLongPress: _repeatLast,
-          child: FloatingActionButton(
-            onPressed: () => ExpenseEditorSheet.show(context),
-            backgroundColor: viz.series,
-            foregroundColor: Colors.white,
-            elevation: 3,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(18),
-            ),
-            tooltip: 'Add expense · hold to repeat the last one',
-            child: const Icon(Icons.add_rounded, size: 28),
-          ),
-        ),
+        // On the Projects tab this button starts a project; everywhere else it
+        // adds a daily expense, and a long press repeats the last one outright.
+        floatingActionButton: _index == HomeShell.projectsTab
+            // Spelled out rather than a bare +: this tab adds a project, not an
+            // expense, and the two are not interchangeable.
+            ? FloatingActionButton.extended(
+                onPressed: () => ProjectsScreen.start(context),
+                backgroundColor: viz.series,
+                foregroundColor: Colors.white,
+                elevation: 3,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                icon: const Icon(Icons.add_rounded, size: 22),
+                label: const Text('New project'),
+              )
+            : GestureDetector(
+                onLongPress: _repeatLast,
+                child: FloatingActionButton(
+                  onPressed: () => ExpenseEditorSheet.show(context),
+                  backgroundColor: viz.series,
+                  foregroundColor: Colors.white,
+                  elevation: 3,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  tooltip: 'Add expense · hold to repeat the last one',
+                  child: const Icon(Icons.add_rounded, size: 28),
+                ),
+              ),
         bottomNavigationBar: _BottomBar(index: _index, onChanged: _open),
       ),
     );
@@ -162,6 +182,7 @@ class _BottomBar extends StatelessWidget {
     (icon: Icons.insights_rounded, label: 'Insights'),
     (icon: Icons.receipt_long_rounded, label: 'Expenses'),
     (icon: Icons.savings_rounded, label: 'Budgets'),
+    (icon: Icons.foundation_rounded, label: 'Projects'),
   ];
 
   @override

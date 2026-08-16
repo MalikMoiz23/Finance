@@ -7,6 +7,7 @@ import 'package:finance/data/local_prefs.dart';
 import 'package:finance/models/budget.dart';
 import 'package:finance/models/expense.dart';
 import 'package:finance/models/expense_category.dart';
+import 'package:finance/screens/home_shell.dart';
 import 'package:finance/state/auth_controller.dart';
 import 'package:finance/state/expense_store.dart';
 import 'package:finance/state/theme_controller.dart';
@@ -26,6 +27,7 @@ class _Harness {
     this.api,
     this.budgets,
     this.incomes,
+    this.projects,
     this.store,
     this.online,
   );
@@ -34,6 +36,7 @@ class _Harness {
   final FakeExpenseApi api;
   final FakeBudgetApi budgets;
   final FakeIncomeApi incomes;
+  final FakeProjectApi projects;
   final ExpenseStore store;
 
   /// Push false to simulate losing the connection, true to regain it.
@@ -53,6 +56,7 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
   final api = FakeExpenseApi(authGateway);
   final budgets = FakeBudgetApi(authGateway);
   final incomes = FakeIncomeApi(authGateway);
+  final projects = FakeProjectApi(authGateway);
   final prefs = LocalPrefs();
   // In-memory LocalDb: same contract and outbox as SQLite, no plugin needed.
   final localDb = JsonLocalDb(MemoryKeyValueStore());
@@ -64,6 +68,7 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
     api: api,
     budgetApi: budgets,
     incomeApi: incomes,
+    projectApi: projects,
     localDb: localDb,
     onlineChanges: online.stream,
   );
@@ -83,7 +88,15 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
     ),
   );
   await tester.pumpAndSettle();
-  return _Harness(authGateway, api, budgets, incomes, store, online);
+  return _Harness(
+    authGateway,
+    api,
+    budgets,
+    incomes,
+    projects,
+    store,
+    online,
+  );
 }
 
 const _name = 'Abdul Moiz';
@@ -830,5 +843,339 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(_tab(0));
     await tester.pumpAndSettle();
+  });
+
+  // ------------------------------------------------------------- projects ---
+
+  testWidgets('the Projects tab explains itself before anything exists', (
+    tester,
+  ) async {
+    await _bootApp(tester);
+    await _register(tester);
+
+    await tester.tap(_tab(HomeShell.projectsTab));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No projects yet'), findsOneWidget);
+    // `FilledButton.icon` is a private subclass, so the label is the handle.
+    expect(find.text('Start a project'), findsOneWidget);
+    expect(
+      find.text('None of it touches your monthly spending or budgets.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a project is created from the tab and opens straight away', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+
+    await tester.tap(_tab(HomeShell.projectsTab));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start a project'));
+    await tester.pumpAndSettle();
+
+    // The example chips are the fastest path to a name.
+    await tester.tap(find.text('Building a house'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'e.g. 2500000'),
+      '2500000',
+    );
+    await tester.pumpAndSettle();
+    final create = find.widgetWithText(FilledButton, 'Create project');
+    await tester.ensureVisible(create);
+    await tester.pumpAndSettle();
+    await tester.tap(create);
+    await tester.pumpAndSettle();
+
+    expect(app.store.projects.length, 1);
+    expect(app.store.projects.first.name, 'Building a house');
+    expect(app.store.projects.first.estimate, 2500000);
+    expect(app.projects.projectsFor(userId).length, 1);
+
+    // Straight into the empty ledger, not back to a list.
+    expect(find.text('Nothing logged yet'), findsOneWidget);
+    expect(find.text('SPENT SO FAR'), findsOneWidget);
+  });
+
+  testWidgets('bricks are logged by quantity and rate, and the total is '
+      'computed', (tester) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final project = await app.store.createProject(
+      name: 'Building a house',
+      estimate: 2500000,
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(_tab(HomeShell.projectsTab));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Building a house'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Add the first entry'));
+    await tester.pumpAndSettle();
+
+    // Quantity x rate is the second mode; the form opens on Total.
+    await tester.tap(find.text('Quantity × rate'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.widgetWithText(TextField, 'e.g. Bricks'), 'Bri');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Bricks').last);
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Quantity').first,
+      '5000',
+    );
+    await tester.enterText(find.widgetWithText(TextField, 'Rate per piece'),
+        '18.5');
+    await tester.pumpAndSettle();
+
+    // The arithmetic is on screen before anything is saved.
+    expect(find.text('5,000 pieces × Rs 18.50'), findsOneWidget);
+    expect(find.text('Rs 92,500'), findsWidgets);
+
+    final save = find.widgetWithText(FilledButton, 'Add entry');
+    await tester.ensureVisible(save);
+    await tester.pumpAndSettle();
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+
+    final summary = app.store.projectById(project.id)!;
+    expect(summary.total, 92500);
+    expect(summary.entries.single.quantity, 5000);
+    expect(summary.entries.single.rate, 18.5);
+    expect(summary.entries.single.unit, 'pieces');
+    // The unit came from picking "Bricks", not from typing it.
+    expect(find.text('5,000 pieces × Rs 18.50'), findsOneWidget);
+  });
+
+  testWidgets('project spending stays out of the monthly figures', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+    app.api.seed(userId, _sampleExpenses(DateTime.now()));
+    await app.store.sync();
+    await tester.pumpAndSettle();
+
+    await app.store.saveIncome(DateTime.now(), 120000);
+    await app.store.saveBudget(ExpenseCategory.groceries, 10000);
+    await tester.pumpAndSettle();
+
+    final spentBefore = app.store.summary.total;
+    final savedBefore = app.store.monthMoney(DateTime.now()).saved;
+    final groceriesBefore = app.store.spentThisMonth(ExpenseCategory.groceries);
+
+    final project = await app.store.createProject(name: 'Building a house');
+    await app.store.addProjectEntry(
+      projectId: project.id,
+      stage: 'Bricks',
+      amount: 0,
+      quantity: 5000,
+      rate: 18.5,
+      unit: 'pieces',
+      date: DateTime.now(),
+    );
+    await tester.pumpAndSettle();
+
+    expect(app.store.projectsTotal, 92500);
+    expect(app.store.summary.total, spentBefore);
+    expect(app.store.monthMoney(DateTime.now()).saved, savedBefore);
+    expect(
+      app.store.spentThisMonth(ExpenseCategory.groceries),
+      groceriesBefore,
+    );
+    expect(app.store.totalSpentThisMonth, isNot(92500));
+  });
+
+  testWidgets('a project built offline reaches the server on reconnect', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+
+    app.api.offline = true;
+    app.budgets.offline = true;
+    app.incomes.offline = true;
+    app.projects.offline = true;
+    app.online.add(false);
+    await tester.pumpAndSettle();
+
+    final project = await app.store.createProject(
+      name: 'Building a house',
+      estimate: 2500000,
+    );
+    await app.store.addProjectEntry(
+      projectId: project.id,
+      stage: 'Bricks',
+      amount: 0,
+      quantity: 5000,
+      rate: 18.5,
+      unit: 'pieces',
+      date: DateTime.now(),
+    );
+    await app.store.addProjectEntry(
+      projectId: project.id,
+      stage: 'Mason labour',
+      amount: 18900,
+      date: DateTime.now(),
+    );
+    await tester.pumpAndSettle();
+
+    expect(app.store.projectsTotal, 111400, reason: 'usable with no network');
+    expect(app.store.pendingCount, 3);
+    expect(app.projects.projectsFor(userId), isEmpty);
+
+    app.api.offline = false;
+    app.budgets.offline = false;
+    app.incomes.offline = false;
+    app.projects.offline = false;
+    app.online.add(true);
+    await tester.pumpAndSettle();
+
+    expect(app.store.pendingCount, 0);
+    expect(app.store.syncState, SyncState.synced);
+    expect(app.projects.projectsFor(userId).length, 1);
+    expect(app.projects.entriesFor(userId).length, 2);
+    expect(app.store.projectsTotal, 111400, reason: 'no duplicates after pull');
+  });
+
+  testWidgets('editing a project after adding to it still pushes the entry', (
+    tester,
+  ) async {
+    // The queue collapses a repeated edit by moving that row's op to the back.
+    // Without parents-before-children ordering the entry would be pushed first
+    // and rejected: its project does not exist on the server yet.
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+
+    app.api.offline = true;
+    app.budgets.offline = true;
+    app.incomes.offline = true;
+    app.projects.offline = true;
+    app.online.add(false);
+    await tester.pumpAndSettle();
+
+    final project = await app.store.createProject(name: 'Building a house');
+    await app.store.addProjectEntry(
+      projectId: project.id,
+      stage: 'Bricks',
+      amount: 92500,
+      date: DateTime.now(),
+    );
+    // The edit lands *after* the entry in the queue.
+    await app.store.saveProject(project.copyWith(estimate: 2500000));
+    await tester.pumpAndSettle();
+
+    app.api.offline = false;
+    app.budgets.offline = false;
+    app.incomes.offline = false;
+    app.projects.offline = false;
+    app.online.add(true);
+    await tester.pumpAndSettle();
+
+    expect(app.store.syncError, isNull);
+    expect(app.store.pendingCount, 0);
+    expect(app.projects.projectsFor(userId).single.estimate, 2500000);
+    expect(app.projects.entriesFor(userId).length, 1);
+  });
+
+  testWidgets('deleting a project takes its entries with it, here and there', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+
+    final project = await app.store.createProject(name: 'Building a house');
+    await app.store.addProjectEntry(
+      projectId: project.id,
+      stage: 'Bricks',
+      amount: 92500,
+      date: DateTime.now(),
+    );
+    await tester.pumpAndSettle();
+    expect(app.projects.entriesFor(userId).length, 1);
+
+    await app.store.deleteProject(project.id);
+    await tester.pumpAndSettle();
+
+    expect(app.store.projects, isEmpty);
+    expect(app.store.projectsTotal, 0);
+    expect(app.store.pendingCount, 0);
+    expect(app.projects.projectsFor(userId), isEmpty);
+    expect(app.projects.entriesFor(userId), isEmpty);
+    expect(app.store.syncError, isNull);
+  });
+
+  testWidgets('a project deleted offline drops its entries queued ops too', (
+    tester,
+  ) async {
+    // Both created offline, so neither ever reached the server. A queued insert
+    // for the entry would be pushed after the project delete and rejected.
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+
+    app.api.offline = true;
+    app.budgets.offline = true;
+    app.incomes.offline = true;
+    app.projects.offline = true;
+    app.online.add(false);
+    await tester.pumpAndSettle();
+
+    final project = await app.store.createProject(name: 'Mistake');
+    await app.store.addProjectEntry(
+      projectId: project.id,
+      stage: 'Bricks',
+      amount: 92500,
+      date: DateTime.now(),
+    );
+    await app.store.deleteProject(project.id);
+    await tester.pumpAndSettle();
+
+    app.api.offline = false;
+    app.budgets.offline = false;
+    app.incomes.offline = false;
+    app.projects.offline = false;
+    app.online.add(true);
+    await tester.pumpAndSettle();
+
+    expect(app.store.syncError, isNull);
+    expect(app.store.pendingCount, 0);
+    expect(app.projects.projectsFor(userId), isEmpty);
+    expect(app.projects.entriesFor(userId), isEmpty);
+  });
+
+  testWidgets('the Overview only mentions projects once one exists', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+
+    await _revealText(tester, 'Recent expenses');
+    expect(find.text('Paid from savings · not in the figures above'),
+        findsNothing);
+
+    final project = await app.store.createProject(name: 'Building a house');
+    await app.store.addProjectEntry(
+      projectId: project.id,
+      stage: 'Bricks',
+      amount: 92500,
+      date: DateTime.now(),
+    );
+    await tester.pumpAndSettle();
+
+    await _revealText(tester, 'Paid from savings · not in the figures above');
+    expect(find.text('Biggest: Building a house · Rs 92,500'), findsOneWidget);
   });
 }

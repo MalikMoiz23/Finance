@@ -1,5 +1,11 @@
 import 'package:intl/intl.dart';
 
+/// Grouped, with a fraction only when the value has one: `5,000`, `18.5`.
+final NumberFormat _upToTwo = NumberFormat('#,##0.##', 'en_US');
+
+/// Grouped, always two decimals: `18.50`.
+final NumberFormat _exactlyTwo = NumberFormat('#,##0.00', 'en_US');
+
 /// Currency is PKR, displayed without decimals (Rs 1,250).
 abstract final class Money {
   static final NumberFormat _grouped = NumberFormat('#,##0', 'en_US');
@@ -28,6 +34,16 @@ abstract final class Money {
     return '$prefix${_grouped.format(value.round())}';
   }
 
+  /// `Rs 18.50` — a per-unit rate keeps its paisa. Rounding Rs 18.50 to Rs 19
+  /// on a five-thousand-brick order misstates the total by Rs 2,500, so rates
+  /// are the one place the app shows decimals. A whole rate stays whole:
+  /// `Rs 1,300`, not `Rs 1,300.00`.
+  static String rate(num value) {
+    final v = value.toDouble();
+    if (v == v.roundToDouble()) return '$symbol ${_grouped.format(v)}';
+    return '$symbol ${_exactlyTwo.format(v)}';
+  }
+
   /// Axis ticks: no symbol, exact (never rounded — a tick that says 1.3k when
   /// the gridline is at 1,250 misstates the scale).
   static String axisTick(num value) {
@@ -39,6 +55,12 @@ abstract final class Money {
     if (v >= 1000 && v % 1000 == 0) return '${(v / 1000).toStringAsFixed(0)}k';
     return _grouped.format(v);
   }
+}
+
+/// Counts of things bought — bricks, bags, trips. Not money, so no symbol, and
+/// a fraction only when there is one (`5,000`, but `2.5` trips).
+abstract final class Quantities {
+  static String format(num value) => _upToTwo.format(value);
 }
 
 abstract final class Dates {

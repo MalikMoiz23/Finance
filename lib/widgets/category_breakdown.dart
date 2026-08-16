@@ -5,6 +5,7 @@ import '../core/formatters.dart';
 import '../models/analytics.dart';
 import 'category_icon.dart';
 import 'delta_badge.dart';
+import 'share_meter.dart';
 
 /// "Where the money went" — a ranked list, not a pie.
 ///
@@ -104,7 +105,7 @@ class _SliceRow extends StatelessWidget {
               const SizedBox(height: 7),
               Row(
                 children: [
-                  Expanded(child: _ShareMeter(share: slice.share)),
+                  Expanded(child: ShareMeter(share: slice.share)),
                   const SizedBox(width: 10),
                   SizedBox(
                     width: 34,
@@ -142,41 +143,6 @@ class _SliceRow extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// Share of the period total. The track is a lighter step of the fill's own
-/// ramp, so the meter reads across its whole length.
-class _ShareMeter extends StatelessWidget {
-  const _ShareMeter({required this.share});
-
-  final double share;
-
-  @override
-  Widget build(BuildContext context) {
-    final viz = context.viz;
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(4),
-      child: Container(
-        height: 7,
-        color: viz.seriesTrack,
-        child: TweenAnimationBuilder<double>(
-          tween: Tween<double>(begin: 0, end: share.clamp(0.0, 1.0)),
-          duration: const Duration(milliseconds: 560),
-          curve: Curves.easeOutCubic,
-          builder: (context, value, _) => FractionallySizedBox(
-            alignment: Alignment.centerLeft,
-            widthFactor: value,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: viz.series,
-                borderRadius: BorderRadius.circular(4),
-              ),
-            ),
-          ),
-        ),
-      ),
     );
   }
 }
