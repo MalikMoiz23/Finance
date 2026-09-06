@@ -11,6 +11,7 @@ import '../models/item_catalog.dart';
 import '../state/expense_store.dart';
 import '../widgets/category_icon.dart';
 import '../widgets/pressable.dart';
+import 'family_members_sheet.dart';
 
 /// Add or edit one expense: amount, what it was, category, date, note.
 ///
@@ -43,6 +44,7 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
 
   late ExpenseCategory _category;
   late DateTime _date;
+  String? _memberId;
   String? _error;
   bool _saving = false;
   bool _suggestionsOpen = false;
@@ -53,6 +55,7 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
   void initState() {
     super.initState();
     final existing = widget.existing;
+    _memberId = existing?.memberId;
     _amount = TextEditingController(
       text: existing == null ? '' : _trimAmount(existing.amount),
     );
@@ -68,6 +71,19 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
 
   static String _trimAmount(double value) =>
       value == value.roundToDouble() ? '${value.round()}' : '$value';
+
+  /// The person this will be saved against.
+  ///
+  /// With exactly one person in the house there is only one possible answer, so
+  /// it is filled in rather than demanded; with more than one, nothing is
+  /// assumed and the form insists. An id whose person has since been removed
+  /// counts as unset, so the form asks again instead of saving a name that no
+  /// longer exists.
+  String? _selectedMember(ExpenseStore store) {
+    final chosen = _memberId;
+    if (chosen != null && store.memberById(chosen) != null) return chosen;
+    return store.members.length == 1 ? store.members.single.id : null;
+  }
 
   @override
   void dispose() {
@@ -138,13 +154,24 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
       setState(() => _error = 'Enter an amount greater than 0');
       return;
     }
+    // Required: an expense nobody owns cannot answer the question the family
+    // list exists to answer.
+    final store = context.read<ExpenseStore>();
+    final memberId = _selectedMember(store);
+    if (memberId == null) {
+      setState(
+        () => _error = store.members.isEmpty
+            ? 'Add the people in your house first'
+            : 'Pick who spent this',
+      );
+      return;
+    }
     if (_saving) return;
     setState(() {
       _saving = true;
       _error = null;
     });
 
-    final store = context.read<ExpenseStore>();
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     final existing = widget.existing;
@@ -157,6 +184,7 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
           date: _date,
           item: _item.text,
           note: _note.text,
+          memberId: memberId,
         );
       } else {
         await store.update(
@@ -166,6 +194,7 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
             date: _date,
             item: _item.text,
             note: _note.text,
+            memberId: memberId,
           ),
         );
       }
@@ -377,6 +406,38 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
               ),
             ),
 
+            // ------------------------------------------------------- person ---
+            const SizedBox(height: 20),
+            _FieldLabel('Who spent this?'),
+            const SizedBox(height: 10),
+            if (store.members.isEmpty)
+              _NoMembersYet(
+                onAdd: () => FamilyMembersSheet.show(context),
+              )
+            else
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final member in store.members)
+                    _PersonChip(
+                      name: member.name,
+                      initials: member.initials,
+                      selected: member.id == _selectedMember(store),
+                      onTap: () {
+                        HapticFeedback.selectionClick();
+                        setState(() {
+                          _memberId = member.id;
+                          _error = null;
+                        });
+                      },
+                    ),
+                  _AddPersonChip(
+                    onTap: () => FamilyMembersSheet.show(context),
+                  ),
+                ],
+              ),
+
             // --------------------------------------------------- quick add ---
             if (quickAdd.isNotEmpty) ...[
               const SizedBox(height: 16),
@@ -570,6 +631,154 @@ class _ExpenseEditorSheetState extends State<ExpenseEditorSheet> {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// One person to attribute the expense to. Required, so the unselected state
+/// has to look unfinished rather than merely optional.
+class _PersonChip extends StatelessWidget {
+  const _PersonChip({
+    required this.name,
+    required this.initials,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String name;
+  final String initials;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    return Pressable(
+      onTap: onTap,
+      scale: 0.95,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.fromLTRB(6, 6, 14, 6),
+        decoration: BoxDecoration(
+          color: selected
+              ? viz.series.withValues(alpha: context.isDarkMode ? 0.24 : 0.12)
+              : viz.surfaceAlt,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: selected ? viz.series : viz.hairline),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            MemberAvatar(
+              name: name,
+              initials: initials,
+              size: 30,
+              selected: selected,
+            ),
+            const SizedBox(width: 9),
+            Text(
+              name,
+              style: context.text.labelLarge?.copyWith(
+                color: selected ? viz.series : viz.inkSecondary,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+              ),
+            ),
+            // The tick is what carries "chosen" for anyone who cannot separate
+            // the two fills by colour.
+            if (selected) ...[
+              const SizedBox(width: 7),
+              Icon(Icons.check_circle_rounded, size: 16, color: viz.series),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AddPersonChip extends StatelessWidget {
+  const _AddPersonChip({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    return Pressable(
+      onTap: onTap,
+      scale: 0.95,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: viz.hairline),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.person_add_alt_rounded, size: 16, color: viz.inkMuted),
+            const SizedBox(width: 7),
+            Text(
+              'Add person',
+              style: context.text.labelLarge?.copyWith(
+                color: viz.inkMuted,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown when the household has nobody in it yet. With the person required,
+/// this is a dead end unless it offers the way out, so it does.
+class _NoMembersYet extends StatelessWidget {
+  const _NoMembersYet({required this.onAdd});
+
+  final VoidCallback onAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: viz.surfaceAlt,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: viz.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Nobody added yet. Add the people in your house and every expense '
+            'will record who spent it.',
+            style: context.text.bodySmall?.copyWith(
+              color: viz.inkSecondary,
+              height: 1.45,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 44,
+            child: FilledButton.icon(
+              onPressed: onAdd,
+              icon: const Icon(Icons.person_add_alt_rounded, size: 18),
+              label: const Text('Add family members'),
+              style: FilledButton.styleFrom(
+                backgroundColor: viz.series,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

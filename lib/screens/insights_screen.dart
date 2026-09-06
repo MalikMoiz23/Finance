@@ -5,6 +5,7 @@ import '../core/app_theme.dart';
 import '../core/formatters.dart';
 import '../models/analytics.dart';
 import '../models/expense.dart';
+import '../models/family_member.dart';
 import '../models/item_catalog.dart';
 import '../state/expense_store.dart';
 import '../widgets/category_breakdown.dart';
@@ -15,10 +16,12 @@ import '../widgets/entrance.dart';
 import '../widgets/expense_tile.dart';
 import '../widgets/period_filter_bar.dart';
 import '../widgets/section_card.dart';
+import '../widgets/share_meter.dart';
 import '../widgets/spend_calendar.dart';
 import '../widgets/stat_tile.dart';
 import '../widgets/trend_bar_chart.dart';
 import 'expense_editor_sheet.dart';
+import 'family_members_sheet.dart';
 
 class InsightsScreen extends StatelessWidget {
   const InsightsScreen({super.key});
@@ -143,9 +146,20 @@ class InsightsScreen extends StatelessWidget {
                 ),
               ),
             ),
+            if (store.hasMembers) ...[
+              const SizedBox(height: AppSizes.gap),
+              Entrance(
+                index: 4,
+                child: SectionCard(
+                  title: 'Spent by person',
+                  subtitle: 'Share of $scope',
+                  child: _MemberBreakdown(rows: store.spendByMemberThisPeriod),
+                ),
+              ),
+            ],
             const SizedBox(height: AppSizes.gap),
             Entrance(
-              index: 4,
+              index: 5,
               child: SectionCard(
                 title: 'Spending by weekday',
                 subtitle: 'Which days cost the most',
@@ -156,12 +170,12 @@ class InsightsScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: AppSizes.gap),
-            const Entrance(index: 5, child: _CalendarCard()),
+            const Entrance(index: 6, child: _CalendarCard()),
             const SizedBox(height: AppSizes.gap),
-            Entrance(index: 6, child: _TopItemsCard(summary: summary)),
+            Entrance(index: 7, child: _TopItemsCard(summary: summary)),
             const SizedBox(height: AppSizes.gap),
             Entrance(
-              index: 7,
+              index: 8,
               child: SectionCard(
                 title: 'Biggest single spends',
                 subtitle: 'Top ${summary.biggest.length} of ${summary.count}',
@@ -181,6 +195,121 @@ class InsightsScreen extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// Who spent what, ranked.
+///
+/// Same form as the category breakdown above it: bars in a single hue with the
+/// amount labelled on every row. People get no colour of their own — the eight
+/// categorical slots already mean *category*, and a second scale sharing those
+/// hues would have one green mean both Abba and groceries.
+class _MemberBreakdown extends StatelessWidget {
+  const _MemberBreakdown({required this.rows});
+
+  final List<MemberSpend> rows;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    if (rows.isEmpty) {
+      return Text(
+        'Nothing logged in this period.',
+        style: context.text.bodySmall?.copyWith(color: viz.inkMuted),
+      );
+    }
+    final total = rows.fold<double>(0, (sum, r) => sum + r.total);
+
+    return Column(
+      children: [
+        for (var i = 0; i < rows.length; i++) ...[
+          if (i > 0) const SizedBox(height: 16),
+          _MemberRow(row: rows[i], share: rows[i].shareOf(total)),
+        ],
+      ],
+    );
+  }
+}
+
+class _MemberRow extends StatelessWidget {
+  const _MemberRow({required this.row, required this.share});
+
+  final MemberSpend row;
+  final double share;
+
+  @override
+  Widget build(BuildContext context) {
+    final viz = context.viz;
+    final percent = share * 100;
+    final percentLabel = percent > 0 && percent < 1
+        ? '<1%'
+        : '${percent.round()}%';
+
+    return Row(
+      children: [
+        MemberAvatar(name: row.name, initials: row.initials, size: 38),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      row.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.text.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        // The unattributed row is real money, so it is listed —
+                        // but muted, because it is a gap rather than a person.
+                        color: row.unassigned ? viz.inkMuted : viz.inkPrimary,
+                        fontStyle: row.unassigned
+                            ? FontStyle.italic
+                            : FontStyle.normal,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    Money.format(row.total),
+                    style: context.text.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: viz.inkPrimary,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 7),
+              Row(
+                children: [
+                  Expanded(child: ShareMeter(share: share)),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 34,
+                    child: Text(
+                      percentLabel,
+                      textAlign: TextAlign.right,
+                      style: context.text.labelSmall?.copyWith(
+                        color: viz.inkSecondary,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '${row.count} ${row.count == 1 ? 'entry' : 'entries'}',
+                style: context.text.labelSmall?.copyWith(color: viz.inkMuted),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

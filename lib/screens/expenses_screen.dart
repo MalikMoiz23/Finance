@@ -40,6 +40,11 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
   String _query = '';
   ExpenseCategory? _category;
 
+  /// Null shows everyone. [_unassignedFilter] is the sentinel for "Not set",
+  /// which is a real thing to filter by and not the same as no filter at all.
+  String? _memberId;
+  static const _unassignedFilter = '__none__';
+
   /// Search the whole history instead of just the selected period.
   bool _allTime = false;
   _Sort _sort = _Sort.newest;
@@ -50,13 +55,25 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
     super.dispose();
   }
 
-  bool _matches(Expense expense) {
+  bool _matches(Expense expense, ExpenseStore store) {
     if (_category != null && expense.category != _category) return false;
+    final person = _memberId;
+    if (person != null) {
+      // An id whose person has been removed reads as unattributed, matching
+      // what the breakdown and the rows themselves show.
+      final actual = store.memberById(expense.memberId)?.id;
+      if (person == _unassignedFilter) {
+        if (actual != null) return false;
+      } else if (actual != person) {
+        return false;
+      }
+    }
     if (_query.isEmpty) return true;
     final q = _query.toLowerCase();
     return expense.item.toLowerCase().contains(q) ||
         expense.note.toLowerCase().contains(q) ||
         expense.category.label.toLowerCase().contains(q) ||
+        store.memberNameFor(expense.memberId).toLowerCase().contains(q) ||
         expense.amount.round().toString().contains(q);
   }
 
@@ -67,7 +84,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
     final summary = store.summary;
 
     final source = _allTime ? store.allExpenses : summary.expenses;
-    final filtered = source.where(_matches).toList();
+    final filtered = source.where((e) => _matches(e, store)).toList();
     if (_sort == _Sort.biggest) {
       filtered.sort((a, b) => b.amount.compareTo(a.amount));
     }
@@ -189,6 +206,56 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
               ],
             ),
           ),
+          // People first: "what did Abba spend" is a whole-list question, where
+          // a category is a slice of whatever list you are already looking at.
+          if (store.hasMembers)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppSizes.gutter,
+                  ),
+                  child: Row(
+                    children: [
+                      _FilterPill(
+                        label: 'Everyone',
+                        icon: Icons.groups_rounded,
+                        selected: _memberId == null,
+                        onTap: () => setState(() => _memberId = null),
+                      ),
+                      for (final member in store.members) ...[
+                        const SizedBox(width: 8),
+                        _FilterPill(
+                          label: member.name,
+                          icon: Icons.person_rounded,
+                          selected: _memberId == member.id,
+                          onTap: () => setState(
+                            () => _memberId = _memberId == member.id
+                                ? null
+                                : member.id,
+                          ),
+                        ),
+                      ],
+                      if (store.unassignedExpenseCount > 0) ...[
+                        const SizedBox(width: 8),
+                        _FilterPill(
+                          label: 'Not set',
+                          icon: Icons.help_outline_rounded,
+                          selected: _memberId == _unassignedFilter,
+                          onTap: () => setState(
+                            () => _memberId = _memberId == _unassignedFilter
+                                ? null
+                                : _unassignedFilter,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
           SliverToBoxAdapter(
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
@@ -448,12 +515,17 @@ class _FilterPill extends StatelessWidget {
     required this.selected,
     required this.onTap,
     this.dotColor,
+    this.icon,
   });
 
   final String label;
   final bool selected;
   final VoidCallback onTap;
   final Color? dotColor;
+
+  /// Used by the people row, where there is no category colour to show a dot
+  /// for and the pills need something to tell them apart from the row below.
+  final IconData? icon;
 
   @override
   Widget build(BuildContext context) {
@@ -481,6 +553,14 @@ class _FilterPill extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 7),
+            ],
+            if (icon != null) ...[
+              Icon(
+                icon,
+                size: 15,
+                color: selected ? viz.surface : viz.inkMuted,
+              ),
+              const SizedBox(width: 6),
             ],
             Text(
               label,

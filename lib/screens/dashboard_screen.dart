@@ -24,6 +24,7 @@ import '../widgets/section_card.dart';
 import '../widgets/skeleton.dart';
 import '../widgets/trend_bar_chart.dart';
 import 'expense_editor_sheet.dart';
+import 'family_members_sheet.dart';
 import 'income_sheet.dart';
 import 'home_shell.dart';
 
@@ -598,6 +599,7 @@ class _DashboardHeader extends StatelessWidget {
               side: BorderSide(color: viz.hairline),
             ),
             onSelected: (value) => switch (value) {
+              'family' => FamilyMembersSheet.show(context),
               'income' => IncomeSheet.show(context),
               'export' => _copyCsv(context),
               'clear' => _confirmClear(context),
@@ -630,6 +632,20 @@ class _DashboardHeader extends StatelessWidget {
                   ),
                 ),
               const PopupMenuDivider(),
+              PopupMenuItem<String>(
+                value: 'family',
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.people_alt_rounded,
+                      size: 19,
+                      color: viz.inkSecondary,
+                    ),
+                    const SizedBox(width: 10),
+                    const Flexible(child: Text('Family members')),
+                  ],
+                ),
+              ),
               PopupMenuItem<String>(
                 value: 'income',
                 child: Row(

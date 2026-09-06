@@ -3,11 +3,12 @@ import 'dart:convert';
 import '../models/budget.dart';
 import '../models/expense.dart';
 import '../models/expense_category.dart';
+import '../models/family_member.dart';
 import '../models/income.dart';
 import '../models/project.dart';
 
 /// Which table a queued change belongs to.
-enum SyncEntity { expense, budget, income, project, projectEntry }
+enum SyncEntity { expense, budget, income, project, projectEntry, member }
 
 /// What the queued change does.
 enum SyncAction { upsert, delete, deleteAll }
@@ -53,6 +54,9 @@ class PendingOp {
   ProjectEntry? get projectEntry =>
       entity == SyncEntity.projectEntry ? ProjectEntry.fromJson(payload) : null;
 
+  FamilyMember? get member =>
+      entity == SyncEntity.member ? FamilyMember.fromJson(payload) : null;
+
   ExpenseCategory get category =>
       ExpenseCategory.fromName(payload['category'] as String? ?? 'other');
 
@@ -97,6 +101,7 @@ abstract interface class LocalDb {
   Future<List<MonthlyIncome>> readIncomes(String userId);
   Future<List<Project>> readProjects(String userId);
   Future<List<ProjectEntry>> readProjectEntries(String userId);
+  Future<List<FamilyMember>> readMembers(String userId);
 
   /// Applies a change locally. Used both for the user's own edits and for rows
   /// arriving from a pull.
@@ -113,6 +118,11 @@ abstract interface class LocalDb {
   Future<void> removeProject(String userId, String projectId);
   Future<void> putProjectEntry(String userId, ProjectEntry entry);
   Future<void> removeProjectEntry(String userId, String entryId);
+  Future<void> putMember(String userId, FamilyMember member);
+
+  /// Deletes the member and clears them off every expense that named them,
+  /// matching the `on delete set null` on the server so the two copies agree.
+  Future<void> removeMember(String userId, String memberId);
 
   /// Replaces the local copy of a table with what the server just returned,
   /// while leaving rows named in [keepKeys] alone — those have unsynced edits
@@ -140,6 +150,11 @@ abstract interface class LocalDb {
   Future<void> replaceProjectEntries(
     String userId,
     List<ProjectEntry> rows, {
+    Set<String> keepKeys,
+  });
+  Future<void> replaceMembers(
+    String userId,
+    List<FamilyMember> rows, {
     Set<String> keepKeys,
   });
 

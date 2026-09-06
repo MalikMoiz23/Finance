@@ -10,6 +10,7 @@ class Expense {
     required DateTime date,
     this.item = '',
     this.note = '',
+    this.memberId,
     DateTime? createdAt,
   }) : date = dayOnly(date),
        createdAt = createdAt ?? DateTime.now();
@@ -27,6 +28,11 @@ class Expense {
 
   /// Anything extra ("weekend stock, Al-Fatah"). May be empty.
   final String note;
+
+  /// Which family member spent it. Null on expenses logged before the family
+  /// was set up, and on any whose person was later removed — those read as
+  /// "Not set" rather than being dropped from the totals.
+  final String? memberId;
 
   /// Entry time — only used to keep same-day ordering stable.
   final DateTime createdAt;
@@ -47,12 +53,16 @@ class Expense {
     return parts.join(' · ');
   }
 
+  /// Sentinel so the member can be cleared, not just replaced.
+  static const Object _keep = Object();
+
   Expense copyWith({
     double? amount,
     ExpenseCategory? category,
     DateTime? date,
     String? item,
     String? note,
+    Object? memberId = _keep,
   }) {
     return Expense(
       id: id,
@@ -61,6 +71,9 @@ class Expense {
       date: date ?? this.date,
       item: item ?? this.item,
       note: note ?? this.note,
+      memberId: identical(memberId, _keep)
+          ? this.memberId
+          : memberId as String?,
       createdAt: createdAt,
     );
   }
@@ -72,6 +85,7 @@ class Expense {
     'date': date.toIso8601String(),
     'item': item,
     'note': note,
+    'memberId': memberId,
     'createdAt': createdAt.toIso8601String(),
   };
 
@@ -89,6 +103,7 @@ class Expense {
       date: date,
       item: json['item'] as String? ?? '',
       note: json['note'] as String? ?? '',
+      memberId: json['memberId'] as String?,
       createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? date,
     );
   }

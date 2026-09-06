@@ -71,6 +71,33 @@ create table if not exists public.monthly_income (
 create index if not exists monthly_income_user_month_idx
   on public.monthly_income (user_id, month desc);
 
+-- ---------------------------------------------------------- family members ---
+-- The people in one household. The whole family shares a single login, so a
+-- member is a label, not an account: no password, no permissions, nothing to
+-- sign in as. It answers "who spent this", not "who is allowed to".
+create table if not exists public.family_members (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid()
+               references auth.users (id) on delete cascade,
+  name       text not null check (length(trim(name)) > 0),
+  created_at timestamptz not null default now()
+);
+
+-- Two people called "Abba" in one house would make the breakdown unreadable.
+-- Case-insensitive, so "abba" cannot slip past it either.
+create unique index if not exists family_members_user_name_idx
+  on public.family_members (user_id, lower(trim(name)));
+
+-- Who spent it. Nullable on purpose: expenses logged before the family was set
+-- up keep working, and `set null` means removing a person leaves their spending
+-- in the totals as unattributed rather than deleting real money from history.
+alter table public.expenses
+  add column if not exists member_id uuid
+    references public.family_members (id) on delete set null;
+
+create index if not exists expenses_user_member_idx
+  on public.expenses (user_id, member_id);
+
 -- ---------------------------------------------------------------- projects ---
 -- One-off undertakings paid for out of savings: building a house, a wedding,
 -- a car. Deliberately a separate ledger from `expenses` — nothing here counts
@@ -125,19 +152,41 @@ alter table public.budgets         enable row level security;
 alter table public.monthly_income  enable row level security;
 alter table public.projects        enable row level security;
 alter table public.project_entries enable row level security;
+alter table public.family_members  enable row level security;
 
 drop policy if exists expenses_select_own on public.expenses;
 create policy expenses_select_own on public.expenses for select
   to authenticated using (auth.uid() = user_id);
 
+-- An expense can only name a member of the caller's own household. Checking the
+-- parent as well as user_id stops a client attaching its spending to someone
+-- else's family by sending their member_id.
 drop policy if exists expenses_insert_own on public.expenses;
 create policy expenses_insert_own on public.expenses for insert
-  to authenticated with check (auth.uid() = user_id);
+  to authenticated with check (
+    auth.uid() = user_id
+    and (
+      member_id is null
+      or exists (
+        select 1 from public.family_members m
+        where m.id = member_id and m.user_id = auth.uid()
+      )
+    )
+  );
 
 drop policy if exists expenses_update_own on public.expenses;
 create policy expenses_update_own on public.expenses for update
   to authenticated using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
+  with check (
+    auth.uid() = user_id
+    and (
+      member_id is null
+      or exists (
+        select 1 from public.family_members m
+        where m.id = member_id and m.user_id = auth.uid()
+      )
+    )
+  );
 
 drop policy if exists expenses_delete_own on public.expenses;
 create policy expenses_delete_own on public.expenses for delete
@@ -226,8 +275,25 @@ drop policy if exists project_entries_delete_own on public.project_entries;
 create policy project_entries_delete_own on public.project_entries for delete
   to authenticated using (auth.uid() = user_id);
 
+drop policy if exists members_select_own on public.family_members;
+create policy members_select_own on public.family_members for select
+  to authenticated using (auth.uid() = user_id);
+
+drop policy if exists members_insert_own on public.family_members;
+create policy members_insert_own on public.family_members for insert
+  to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists members_update_own on public.family_members;
+create policy members_update_own on public.family_members for update
+  to authenticated using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists members_delete_own on public.family_members;
+create policy members_delete_own on public.family_members for delete
+  to authenticated using (auth.uid() = user_id);
+
 -- Check after running (expects 4 policies per table):
 --   select tablename, cmd, policyname from pg_policies
 --   where tablename in ('expenses', 'budgets', 'monthly_income',
---                       'projects', 'project_entries')
+--                       'projects', 'project_entries', 'family_members')
 --   order by tablename, cmd;

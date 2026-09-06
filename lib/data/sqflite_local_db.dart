@@ -3,6 +3,7 @@ import 'package:sqflite/sqflite.dart';
 import '../models/budget.dart';
 import '../models/expense.dart';
 import '../models/expense_category.dart';
+import '../models/family_member.dart';
 import '../models/income.dart';
 import '../models/project.dart';
 import 'local_db.dart';
@@ -23,7 +24,7 @@ class SqfliteLocalDb implements LocalDb {
 
   /// Bumped whenever the tables below change. Every version needs a matching
   /// branch in [_upgradeTo], or an existing install breaks on the next launch.
-  static const schemaVersion = 2;
+  static const schemaVersion = 3;
 
   @override
   Future<void> open() async {
@@ -87,7 +88,7 @@ class SqfliteLocalDb implements LocalDb {
           )
         ''');
         batch.execute('CREATE INDEX outbox_user ON outbox (user_id, op_id)');
-        for (final statement in _v2) {
+        for (final statement in [..._v2, ..._v3]) {
           batch.execute(statement);
         }
         await batch.commit(noResult: true);
@@ -96,15 +97,19 @@ class SqfliteLocalDb implements LocalDb {
   }
 
   static Future<void> _upgradeTo(Database db, int version) async {
-    switch (version) {
-      case 2:
-        // Projects: the separate ledger for one-off spending paid from savings.
-        final batch = db.batch();
-        for (final statement in _v2) {
-          batch.execute(statement);
-        }
-        await batch.commit(noResult: true);
+    final statements = switch (version) {
+      // Projects: the separate ledger for one-off spending paid from savings.
+      2 => _v2,
+      // The family: who spent each expense.
+      3 => _v3,
+      _ => const <String>[],
+    };
+    if (statements.isEmpty) return;
+    final batch = db.batch();
+    for (final statement in statements) {
+      batch.execute(statement);
     }
+    await batch.commit(noResult: true);
   }
 
   /// Added in schema version 2. Written once and used by both [_upgradeTo] and
@@ -147,6 +152,32 @@ class SqfliteLocalDb implements LocalDb {
     ''',
     'CREATE INDEX project_entries_project '
         'ON project_entries (user_id, project_id, spent_on DESC)',
+  ];
+
+  /// Added in schema version 3: the household's people, and the column on
+  /// `expenses` naming which of them spent it.
+  ///
+  /// The column is added by `ALTER` here rather than written into the `CREATE
+  /// TABLE expenses` above, so a fresh install runs the identical statement an
+  /// upgraded one does. Putting it in both places would make the ALTER fail on
+  /// a new device with "duplicate column name".
+  ///
+  /// No foreign key, for the same reason `project_entries` has none: every
+  /// write is `INSERT OR REPLACE`, which SQLite implements as a delete, so a
+  /// key here would have re-saving a member wipe them off their own expenses.
+  /// [removeMember] clears the column by hand instead.
+  static const _v3 = <String>[
+    '''
+    CREATE TABLE family_members (
+      user_id    TEXT NOT NULL,
+      id         TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, id)
+    )
+    ''',
+    'ALTER TABLE expenses ADD COLUMN member_id TEXT',
+    'CREATE INDEX expenses_user_member ON expenses (user_id, member_id)',
   ];
 
   // ------------------------------------------------------------------ reads ---
@@ -221,6 +252,25 @@ class SqfliteLocalDb implements LocalDb {
     return rows.map(_entryFrom).toList();
   }
 
+  @override
+  Future<List<FamilyMember>> readMembers(String userId) async {
+    final rows = await _database.query(
+      'family_members',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      orderBy: 'created_at ASC',
+    );
+    return rows
+        .map(
+          (r) => FamilyMember(
+            id: r['id'] as String,
+            name: r['name'] as String,
+            createdAt: DateTime.parse(r['created_at'] as String),
+          ),
+        )
+        .toList();
+  }
+
   static Expense _expenseFrom(Map<String, Object?> r) => Expense(
     id: r['id'] as String,
     amount: (r['amount'] as num).toDouble(),
@@ -228,6 +278,7 @@ class SqfliteLocalDb implements LocalDb {
     date: DateTime.parse(r['spent_on'] as String),
     item: r['item'] as String? ?? '',
     note: r['note'] as String? ?? '',
+    memberId: r['member_id'] as String?,
     createdAt: DateTime.parse(r['created_at'] as String),
   );
 
@@ -263,6 +314,7 @@ class SqfliteLocalDb implements LocalDb {
     'spent_on': e.date.toIso8601String(),
     'item': e.item,
     'note': e.note,
+    'member_id': e.memberId,
     'created_at': e.createdAt.toIso8601String(),
   };
 
@@ -390,6 +442,35 @@ class SqfliteLocalDb implements LocalDb {
       where: 'user_id = ? AND id = ?',
       whereArgs: [userId, entryId],
     );
+  }
+
+  @override
+  Future<void> putMember(String userId, FamilyMember member) async {
+    await _database.insert('family_members', {
+      'user_id': userId,
+      'id': member.id,
+      'name': member.name,
+      'created_at': member.createdAt.toIso8601String(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  @override
+  Future<void> removeMember(String userId, String memberId) async {
+    await _database.transaction((txn) async {
+      // Their spending stays; it just stops being attributed to anyone. Wiping
+      // the expenses too would lose real money from every total.
+      await txn.update(
+        'expenses',
+        {'member_id': null},
+        where: 'user_id = ? AND member_id = ?',
+        whereArgs: [userId, memberId],
+      );
+      await txn.delete(
+        'family_members',
+        where: 'user_id = ? AND id = ?',
+        whereArgs: [userId, memberId],
+      );
+    });
   }
 
   // ------------------------------------------------------------ pull merges ---
@@ -539,6 +620,40 @@ class SqfliteLocalDb implements LocalDb {
     });
   }
 
+  @override
+  Future<void> replaceMembers(
+    String userId,
+    List<FamilyMember> rows, {
+    Set<String> keepKeys = const {},
+  }) async {
+    await _database.transaction((txn) async {
+      final existing = await txn.query(
+        'family_members',
+        columns: ['id'],
+        where: 'user_id = ?',
+        whereArgs: [userId],
+      );
+      for (final row in existing) {
+        final id = row['id'] as String;
+        if (keepKeys.contains(id)) continue;
+        await txn.delete(
+          'family_members',
+          where: 'user_id = ? AND id = ?',
+          whereArgs: [userId, id],
+        );
+      }
+      for (final member in rows) {
+        if (keepKeys.contains(member.id)) continue;
+        await txn.insert('family_members', {
+          'user_id': userId,
+          'id': member.id,
+          'name': member.name,
+          'created_at': member.createdAt.toIso8601String(),
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
   // ----------------------------------------------------------------- outbox ---
 
   @override
@@ -615,6 +730,7 @@ class SqfliteLocalDb implements LocalDb {
         'incomes',
         'projects',
         'project_entries',
+        'family_members',
         'outbox',
       ]) {
         await txn.delete(table, where: 'user_id = ?', whereArgs: [userId]);

@@ -10,12 +10,14 @@ import '../data/budget_api.dart';
 import '../data/expense_api.dart';
 import '../data/income_api.dart';
 import '../data/local_db.dart';
+import '../data/member_api.dart';
 import '../data/project_api.dart';
 import '../models/analytics.dart';
 import '../models/app_user.dart';
 import '../models/budget.dart';
 import '../models/expense.dart';
 import '../models/expense_category.dart';
+import '../models/family_member.dart';
 import '../models/income.dart';
 import '../models/item_catalog.dart';
 import '../models/period.dart';
@@ -50,12 +52,14 @@ class ExpenseStore extends ChangeNotifier {
     required BudgetApi budgetApi,
     required IncomeApi incomeApi,
     required ProjectApi projectApi,
+    required MemberApi memberApi,
     required LocalDb localDb,
     Stream<bool>? onlineChanges,
   }) : _api = api,
        _budgetApi = budgetApi,
        _incomeApi = incomeApi,
        _projectApi = projectApi,
+       _memberApi = memberApi,
        _local = localDb {
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
     _summary = _compute();
@@ -79,6 +83,7 @@ class ExpenseStore extends ChangeNotifier {
   final BudgetApi _budgetApi;
   final IncomeApi _incomeApi;
   final ProjectApi _projectApi;
+  final MemberApi _memberApi;
   final LocalDb _local;
   static const _uuid = Uuid();
 
@@ -89,6 +94,7 @@ class ExpenseStore extends ChangeNotifier {
   final List<MonthlyIncome> _incomes = [];
   final List<Project> _projects = [];
   final List<ProjectEntry> _projectEntries = [];
+  final List<FamilyMember> _members = [];
   Period _period = Period.month;
   late DateTime _anchor;
   late PeriodSummary _summary;
@@ -442,6 +448,167 @@ class ExpenseStore extends ChangeNotifier {
     note: entry.note,
   );
 
+  // --------------------------------------------------------------- family ---
+  //
+  // One login for the whole house, so a member is a label rather than an
+  // account. Nothing here is a security boundary: whoever holds the phone can
+  // add, rename or remove any of them, and can log spending as any of them.
+  // That is the point — it answers "who spent it", not "who is allowed to".
+
+  List<FamilyMember> get members => List.unmodifiable(_members);
+
+  bool get hasMembers => _members.isNotEmpty;
+
+  FamilyMember? memberById(String? id) =>
+      id == null ? null : _members.where((m) => m.id == id).firstOrNull;
+
+  /// Name for a row in a list. Falls back rather than showing a raw id when the
+  /// member has been deleted out from under an expense.
+  String memberNameFor(String? id) => memberById(id)?.name ?? 'Not set';
+
+  /// True when [name] is already taken, ignoring case and surrounding spaces.
+  /// [exceptId] lets a rename keep its own name.
+  bool memberNameTaken(String name, {String? exceptId}) {
+    final key = name.trim().toLowerCase();
+    return _members.any((m) => m.id != exceptId && m.name.toLowerCase() == key);
+  }
+
+  /// Who spent what over [expenses], biggest first, with the unattributed
+  /// total last. Pass `summary.expenses` for the selected period, or
+  /// [allExpenses] for all time.
+  List<MemberSpend> spendByMember(List<Expense> expenses) {
+    final totals = <String, ({double total, int count})>{};
+    var unassignedTotal = 0.0;
+    var unassignedCount = 0;
+
+    for (final expense in expenses) {
+      final id = expense.memberId;
+      // An id pointing at a member who no longer exists counts as unattributed
+      // rather than conjuring a row with no name.
+      if (id == null || memberById(id) == null) {
+        unassignedTotal += expense.amount;
+        unassignedCount++;
+        continue;
+      }
+      final seen = totals[id];
+      totals[id] = (
+        total: (seen?.total ?? 0) + expense.amount,
+        count: (seen?.count ?? 0) + 1,
+      );
+    }
+
+    final rows =
+        totals.entries
+            .map(
+              (e) => MemberSpend(
+                member: memberById(e.key),
+                total: e.value.total,
+                count: e.value.count,
+              ),
+            )
+            .toList()
+          ..sort((a, b) => b.total.compareTo(a.total));
+
+    if (unassignedCount > 0) {
+      rows.add(
+        MemberSpend(
+          member: null,
+          total: unassignedTotal,
+          count: unassignedCount,
+        ),
+      );
+    }
+    return rows;
+  }
+
+  /// The per-person split for the period currently on screen.
+  List<MemberSpend> get spendByMemberThisPeriod =>
+      spendByMember(_summary.expenses);
+
+  /// How many expenses have nobody attached — the ones logged before the family
+  /// was set up.
+  int get unassignedExpenseCount => _expenses
+      .where((e) => e.memberId == null || memberById(e.memberId) == null)
+      .length;
+
+  Future<FamilyMember> addMember(String name) async {
+    final member = FamilyMember(id: _uuid.v4(), name: name.trim());
+    await saveMember(member);
+    return member;
+  }
+
+  Future<void> saveMember(FamilyMember member) async {
+    final userId = _requireUser();
+    await _local.putMember(userId, member);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.member,
+        action: SyncAction.upsert,
+        key: member.id,
+        payload: member.toJson(),
+      ),
+    );
+    final index = _members.indexWhere((m) => m.id == member.id);
+    if (index == -1) {
+      _members.add(member);
+    } else {
+      _members[index] = member;
+    }
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  /// Removes a member. Their expenses stay, with nobody attached.
+  Future<void> deleteMember(String memberId) async {
+    final userId = _requireUser();
+
+    // Clear the member off their expenses first, and re-queue each one, so the
+    // server is told the new value by an op that is already ahead of the member
+    // delete in the queue. Relying on the server's own `on delete set null`
+    // would not be enough: a queued upsert still carrying the old member id
+    // would be rejected by the foreign key once the member row is gone.
+    final theirs = _expenses.where((e) => e.memberId == memberId).toList();
+    for (final expense in theirs) {
+      final cleared = expense.copyWith(memberId: null);
+      await _local.putExpense(userId, cleared);
+      await _local.enqueue(
+        userId,
+        PendingOp(
+          entity: SyncEntity.expense,
+          action: SyncAction.upsert,
+          key: cleared.id,
+          payload: cleared.toJson(),
+        ),
+      );
+      _expenses[_expenses.indexWhere((e) => e.id == expense.id)] = cleared;
+    }
+
+    await _local.removeMember(userId, memberId);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.member,
+        action: SyncAction.delete,
+        key: memberId,
+        payload: {'id': memberId},
+      ),
+    );
+    _members.removeWhere((m) => m.id == memberId);
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  /// How many expenses name this member — what a delete confirmation needs.
+  int expenseCountFor(String memberId) =>
+      _expenses.where((e) => e.memberId == memberId).length;
+
+  double spentBy(String memberId) => _expenses
+      .where((e) => e.memberId == memberId)
+      .fold<double>(0, (sum, e) => sum + e.amount);
+
   // --------------------------------------------------------------- items ---
 
   List<ItemSuggestion> suggestItems(String query, {int limit = 6}) =>
@@ -462,6 +629,7 @@ class ExpenseStore extends ChangeNotifier {
       _incomes.clear();
       _projects.clear();
       _projectEntries.clear();
+      _members.clear();
       _loading = false;
       _pending = 0;
       _syncError = null;
@@ -476,6 +644,7 @@ class ExpenseStore extends ChangeNotifier {
     _incomes.clear();
     _projects.clear();
     _projectEntries.clear();
+    _members.clear();
     _syncError = null;
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
 
@@ -490,6 +659,7 @@ class ExpenseStore extends ChangeNotifier {
     final incomes = await _local.readIncomes(userId);
     final projects = await _local.readProjects(userId);
     final projectEntries = await _local.readProjectEntries(userId);
+    final members = await _local.readMembers(userId);
     final pending = await _local.pendingCount(userId);
     if (_userId != userId) return;
     _expenses
@@ -507,6 +677,9 @@ class ExpenseStore extends ChangeNotifier {
     _projectEntries
       ..clear()
       ..addAll(projectEntries);
+    _members
+      ..clear()
+      ..addAll(members);
     _sort();
     _sortProjectEntries();
     _pending = pending;
@@ -561,14 +734,21 @@ class ExpenseStore extends ChangeNotifier {
   /// preserved and nothing is dropped.
   Future<void> _pushPending(String userId) async {
     final queued = await _local.pendingOps(userId);
-    // Parents before children. Collapsing a repeated edit moves that row's op
-    // to the back of the queue, so editing a project *after* adding an entry to
-    // it would otherwise push the entry first — and the server would reject it,
-    // because the project it points at does not exist there yet. Everything
-    // else keeps its queued order.
+    // Rows other rows point at go first, and their deletes go last; everything
+    // in between keeps its queued order.
+    //
+    // Both halves are needed. Collapsing a repeated edit moves that row's op to
+    // the back of the queue, so editing a project *after* adding an entry to it
+    // would push the entry first and the server would reject it — the project
+    // it names is not there yet. And a member delete has to come after the
+    // expense upserts that clear them off, or those upserts arrive still
+    // naming a member the server has already dropped.
+    bool isParent(PendingOp op) =>
+        op.entity == SyncEntity.project || op.entity == SyncEntity.member;
     final ops = [
-      ...queued.where((o) => o.entity == SyncEntity.project),
-      ...queued.where((o) => o.entity != SyncEntity.project),
+      ...queued.where((o) => isParent(o) && o.action != SyncAction.delete),
+      ...queued.where((o) => !isParent(o)),
+      ...queued.where((o) => isParent(o) && o.action == SyncAction.delete),
     ];
     for (final op in ops) {
       if (_userId != userId) return;
@@ -608,9 +788,15 @@ class ExpenseStore extends ChangeNotifier {
           if (entry != null) await _projectApi.upsertEntry(entry);
         case (SyncEntity.projectEntry, SyncAction.delete):
           await _projectApi.deleteEntry(op.key);
+        case (SyncEntity.member, SyncAction.upsert):
+          final member = op.member;
+          if (member != null) await _memberApi.upsert(member);
+        case (SyncEntity.member, SyncAction.delete):
+          await _memberApi.delete(op.key);
         case (SyncEntity.project, SyncAction.deleteAll):
         case (SyncEntity.projectEntry, SyncAction.deleteAll):
-          break; // projects are removed one at a time, cascading their entries
+        case (SyncEntity.member, SyncAction.deleteAll):
+          break; // projects and people are removed one at a time
       }
       await _local.completeOp(userId, op.id);
       _pending = await _local.pendingCount(userId);
@@ -626,6 +812,7 @@ class ExpenseStore extends ChangeNotifier {
     final remoteIncomes = await _incomeApi.fetchAll();
     final remoteProjects = await _projectApi.fetchProjects();
     final remoteEntries = await _projectApi.fetchEntries();
+    final remoteMembers = await _memberApi.fetchAll();
     if (_userId != userId) return;
 
     final ops = await _local.pendingOps(userId);
@@ -634,6 +821,13 @@ class ExpenseStore extends ChangeNotifier {
         .map((o) => o.key)
         .toSet();
 
+    // People before expenses, so a pulled expense never briefly names someone
+    // the local copy has not heard of.
+    await _local.replaceMembers(
+      userId,
+      remoteMembers,
+      keepKeys: keys(SyncEntity.member),
+    );
     await _local.replaceExpenses(
       userId,
       remoteExpenses,
@@ -711,6 +905,7 @@ class ExpenseStore extends ChangeNotifier {
     required DateTime date,
     required String item,
     required String note,
+    String? memberId,
   }) async {
     // The id is generated here, not by the server, so an expense created offline
     // keeps its identity when it finally syncs.
@@ -721,6 +916,7 @@ class ExpenseStore extends ChangeNotifier {
       date: date,
       item: item.trim(),
       note: note.trim(),
+      memberId: memberId,
     );
     await update(expense);
   }
@@ -774,6 +970,7 @@ class ExpenseStore extends ChangeNotifier {
     date: expense.date,
     item: expense.item,
     note: expense.note,
+    memberId: expense.memberId,
   );
 
   /// Copies an existing expense onto today.
@@ -783,6 +980,7 @@ class ExpenseStore extends ChangeNotifier {
     date: dayOnly(DateTime.now()),
     item: expense.item,
     note: expense.note,
+    memberId: expense.memberId,
   );
 
   Future<Expense?> repeatMostRecent() async {

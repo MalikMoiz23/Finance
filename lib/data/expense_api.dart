@@ -55,6 +55,7 @@ class SupabaseExpenseApi implements ExpenseApi {
       'spent_on': _dateOnly(expense.date),
       'item': expense.item.trim(),
       'note': expense.note.trim(),
+      'member_id': expense.memberId,
       'created_at': expense.createdAt.toUtc().toIso8601String(),
     }, onConflict: 'id');
   }
@@ -90,6 +91,7 @@ class SupabaseExpenseApi implements ExpenseApi {
       date: DateTime.parse(row['spent_on'] as String),
       item: row['item'] as String? ?? '',
       note: row['note'] as String? ?? '',
+      memberId: row['member_id'] as String?,
       createdAt: createdAt?.toLocal(),
     );
   }

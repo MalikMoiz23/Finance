@@ -4,9 +4,11 @@ import 'package:finance/data/auth_gateway.dart';
 import 'package:finance/data/budget_api.dart';
 import 'package:finance/data/expense_api.dart';
 import 'package:finance/data/income_api.dart';
+import 'package:finance/data/member_api.dart';
 import 'package:finance/data/project_api.dart';
 import 'package:finance/models/app_user.dart';
 import 'package:finance/models/budget.dart';
+import 'package:finance/models/family_member.dart';
 import 'package:finance/models/income.dart';
 import 'package:finance/models/expense.dart';
 import 'package:finance/models/expense_category.dart';
@@ -89,9 +91,15 @@ class _Account {
 /// Rows are stored per user id, the way row level security scopes them on the
 /// server, so account isolation is actually testable.
 class FakeExpenseApi implements ExpenseApi {
-  FakeExpenseApi(this._auth);
+  FakeExpenseApi(this._auth, {this.members});
 
   final FakeAuthGateway _auth;
+
+  /// When wired up, an expense naming a member who is not there is rejected the
+  /// way the real foreign key rejects it. Without this the tests would pass on
+  /// a queue ordering Postgres would refuse.
+  final FakeMemberApi? members;
+
   final Map<String, List<Expense>> _rows = {};
 
   /// When true every call fails the way a dropped connection does.
@@ -137,6 +145,16 @@ class FakeExpenseApi implements ExpenseApi {
   @override
   Future<void> upsert(Expense expense) async {
     _guard(write: true);
+    final known = members?.rowsFor(_userId).map((m) => m.id).toSet();
+    if (expense.memberId != null &&
+        known != null &&
+        !known.contains(expense.memberId)) {
+      // What Postgres answers with: 23503, foreign key violation.
+      throw Exception(
+        'PostgrestException: insert or update on table "expenses" violates '
+        'foreign key constraint "expenses_member_id_fkey"',
+      );
+    }
     final rows = _rows.putIfAbsent(_userId, () => []);
     final index = rows.indexWhere((e) => e.id == expense.id);
     if (index == -1) {
@@ -156,6 +174,76 @@ class FakeExpenseApi implements ExpenseApi {
   Future<void> deleteAll() async {
     _guard(write: true);
     _rows[_userId]?.clear();
+  }
+
+  /// The `on delete set null` the server applies when a member is removed.
+  void clearMember(String userId, String memberId) {
+    final rows = _rows[userId];
+    if (rows == null) return;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].memberId == memberId) {
+        rows[i] = rows[i].copyWith(memberId: null);
+      }
+    }
+  }
+}
+
+/// The household's people, scoped per user id the way row level security scopes
+/// them. Deleting one clears them off the expenses rather than taking those
+/// expenses with them, matching `on delete set null`.
+class FakeMemberApi implements MemberApi {
+  FakeMemberApi(this._auth);
+
+  final FakeAuthGateway _auth;
+  final Map<String, List<FamilyMember>> _rows = {};
+
+  /// Wired up after construction, so the delete can mirror the server cascade.
+  FakeExpenseApi? expenses;
+
+  bool offline = false;
+  bool failNextWrite = false;
+
+  String get _userId {
+    final id = _auth.currentUser?.id;
+    if (id == null) throw StateError('Not signed in');
+    return id;
+  }
+
+  List<FamilyMember> rowsFor(String userId) =>
+      List.unmodifiable(_rows[userId] ?? []);
+
+  void _guard({bool write = false}) {
+    if (offline) throw Exception('ClientException: Failed host lookup');
+    if (write && failNextWrite) {
+      failNextWrite = false;
+      throw Exception('ClientException: connection closed');
+    }
+  }
+
+  @override
+  Future<List<FamilyMember>> fetchAll() async {
+    _guard();
+    return [...?_rows[_userId]];
+  }
+
+  @override
+  Future<void> upsert(FamilyMember member) async {
+    _guard(write: true);
+    final rows = _rows.putIfAbsent(_userId, () => []);
+    final index = rows.indexWhere((m) => m.id == member.id);
+    if (index == -1) {
+      rows.add(member);
+    } else {
+      rows[index] = member;
+    }
+  }
+
+  @override
+  Future<void> delete(String id) async {
+    _guard(write: true);
+    final userId = _userId;
+    (_rows[userId] ?? []).removeWhere((m) => m.id == id);
+    expenses?.clearMember(userId, id);
   }
 }
 

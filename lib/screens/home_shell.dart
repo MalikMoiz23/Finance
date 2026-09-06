@@ -11,6 +11,7 @@ import 'budgets_screen.dart';
 import 'dashboard_screen.dart';
 import 'expense_editor_sheet.dart';
 import 'expenses_screen.dart';
+import 'family_members_sheet.dart';
 import 'insights_screen.dart';
 import 'projects_screen.dart';
 
@@ -32,10 +33,27 @@ class _HomeShellState extends State<HomeShell> {
   final PageController _pages = PageController();
   int _index = 0;
 
+  /// The "who is in the house" sheet is offered once per sign-in. If it is
+  /// dismissed there are still two ways back to it — the account menu, and the
+  /// picker inside the expense form — so it never nags.
+  bool _askedForFamily = false;
+
   @override
   void dispose() {
     _pages.dispose();
     super.dispose();
+  }
+
+  /// Right after the first login the household has nobody in it, and with the
+  /// person required on every expense there is nothing useful to do until it
+  /// does. So the app asks, rather than waiting to be found.
+  void _askForFamilyIfNeeded(ExpenseStore store) {
+    if (_askedForFamily || store.isLoading || store.hasMembers) return;
+    _askedForFamily = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      FamilyMembersSheet.show(context, firstRun: true);
+    });
   }
 
   void _open(int index) {
@@ -84,6 +102,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   Widget build(BuildContext context) {
     final viz = context.viz;
+    _askForFamilyIfNeeded(context.watch<ExpenseStore>());
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: context.isDarkMode

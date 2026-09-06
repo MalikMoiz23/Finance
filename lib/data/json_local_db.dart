@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/budget.dart';
 import '../models/expense.dart';
 import '../models/expense_category.dart';
+import '../models/family_member.dart';
 import '../models/income.dart';
 import '../models/project.dart';
 import 'local_db.dart';
@@ -147,6 +148,16 @@ class JsonLocalDb implements LocalDb {
     return out;
   }
 
+  @override
+  Future<List<FamilyMember>> readMembers(String userId) async {
+    final out = (await _list(
+      userId,
+      'family_members',
+    )).map(FamilyMember.fromJson).whereType<FamilyMember>().toList();
+    out.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return out;
+  }
+
   // ----------------------------------------------------------------- writes ---
 
   @override
@@ -265,6 +276,38 @@ class JsonLocalDb implements LocalDb {
     await _save(userId, 'project_entries', rows);
   }
 
+  @override
+  Future<void> putMember(String userId, FamilyMember member) =>
+      _serial(() => _putMember(userId, member));
+
+  Future<void> _putMember(String userId, FamilyMember member) async {
+    final rows = await _list(userId, 'family_members')
+      ..removeWhere((r) => r['id'] == member.id);
+    rows.add(member.toJson());
+    await _save(userId, 'family_members', rows);
+  }
+
+  @override
+  Future<void> removeMember(String userId, String memberId) =>
+      _serial(() => _removeMember(userId, memberId));
+
+  Future<void> _removeMember(String userId, String memberId) async {
+    final members = await _list(userId, 'family_members')
+      ..removeWhere((r) => r['id'] == memberId);
+    await _save(userId, 'family_members', members);
+    // The same `on delete set null` the server does: their spending stays, it
+    // just stops being attributed to anyone.
+    final expenses = await _list(userId, 'expenses');
+    var touched = false;
+    for (final row in expenses) {
+      if (row['memberId'] == memberId) {
+        row['memberId'] = null;
+        touched = true;
+      }
+    }
+    if (touched) await _save(userId, 'expenses', expenses);
+  }
+
   // ------------------------------------------------------------ pull merges ---
 
   @override
@@ -377,6 +420,28 @@ class JsonLocalDb implements LocalDb {
     await _save(userId, 'project_entries', [...kept, ...incoming]);
   }
 
+  @override
+  Future<void> replaceMembers(
+    String userId,
+    List<FamilyMember> rows, {
+    Set<String> keepKeys = const {},
+  }) => _serial(() => _replaceMembers(userId, rows, keepKeys: keepKeys));
+
+  Future<void> _replaceMembers(
+    String userId,
+    List<FamilyMember> rows, {
+    Set<String> keepKeys = const {},
+  }) async {
+    final existing = await _list(userId, 'family_members');
+    final kept = existing
+        .where((r) => keepKeys.contains(r['id'] as String? ?? ''))
+        .toList();
+    final incoming = rows
+        .where((m) => !keepKeys.contains(m.id))
+        .map((m) => m.toJson());
+    await _save(userId, 'family_members', [...kept, ...incoming]);
+  }
+
   // ----------------------------------------------------------------- outbox ---
 
   @override
@@ -455,6 +520,7 @@ class JsonLocalDb implements LocalDb {
       'incomes',
       'projects',
       'project_entries',
+      'family_members',
       'outbox',
     ]) {
       await _store.remove(_key(userId, table));

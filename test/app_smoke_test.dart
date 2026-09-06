@@ -28,6 +28,7 @@ class _Harness {
     this.budgets,
     this.incomes,
     this.projects,
+    this.members,
     this.store,
     this.online,
   );
@@ -37,6 +38,7 @@ class _Harness {
   final FakeBudgetApi budgets;
   final FakeIncomeApi incomes;
   final FakeProjectApi projects;
+  final FakeMemberApi members;
   final ExpenseStore store;
 
   /// Push false to simulate losing the connection, true to regain it.
@@ -53,7 +55,9 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
 
   final authGateway = FakeAuthGateway();
   addTearDown(authGateway.dispose);
-  final api = FakeExpenseApi(authGateway);
+  final members = FakeMemberApi(authGateway);
+  final api = FakeExpenseApi(authGateway, members: members);
+  members.expenses = api;
   final budgets = FakeBudgetApi(authGateway);
   final incomes = FakeIncomeApi(authGateway);
   final projects = FakeProjectApi(authGateway);
@@ -69,6 +73,7 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
     budgetApi: budgets,
     incomeApi: incomes,
     projectApi: projects,
+    memberApi: members,
     localDb: localDb,
     onlineChanges: online.stream,
   );
@@ -94,6 +99,7 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
     budgets,
     incomes,
     projects,
+    members,
     store,
     online,
   );
@@ -103,12 +109,35 @@ const _name = 'Abdul Moiz';
 const _email = 'moiz@example.com';
 const _password = 'secret123';
 
-/// Fills the register form and submits it.
+/// Fills in the "who is in the house" sheet, which opens by itself on a first
+/// login. Every test that adds an expense needs at least one person, because
+/// the form refuses to save without one.
+Future<void> _addFamily(WidgetTester tester, List<String> names) async {
+  for (final person in names) {
+    await tester.enterText(
+      find.widgetWithText(TextField, 'e.g. Abba'),
+      person,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Add this person'));
+    await tester.pumpAndSettle();
+  }
+  final done = find.textContaining('Done');
+  await tester.ensureVisible(done);
+  await tester.pumpAndSettle();
+  await tester.tap(done);
+  await tester.pumpAndSettle();
+}
+
+/// Fills the register form and submits it, then sets up the household.
+///
+/// Pass `family: const []` to leave the setup sheet open and assert on it.
 Future<void> _register(
   WidgetTester tester, {
   String name = _name,
   String email = _email,
   String password = _password,
+  List<String> family = const [_name],
 }) async {
   await tester.tap(find.text('Register'));
   await tester.pumpAndSettle();
@@ -121,6 +150,8 @@ Future<void> _register(
 
   await tester.tap(find.widgetWithText(FilledButton, 'Create account'));
   await tester.pumpAndSettle();
+
+  if (family.isNotEmpty) await _addFamily(tester, family);
 }
 
 Future<void> _login(
@@ -141,10 +172,21 @@ Future<void> _addExpenseThroughUi(
   required String amount,
   String? item,
   String? note,
+  String? person,
 }) async {
   await tester.tap(find.byType(FloatingActionButton));
   await tester.pumpAndSettle();
   await tester.enterText(find.byType(TextField).first, amount);
+  // With one person in the house there is nothing to choose; with several, the
+  // form will not save until one is picked.
+  if (person != null) {
+    await tester.pumpAndSettle();
+    final chip = find.text(person);
+    await tester.ensureVisible(chip);
+    await tester.pumpAndSettle();
+    await tester.tap(chip);
+    await tester.pumpAndSettle();
+  }
   if (item != null) {
     await tester.enterText(
       find.widgetWithText(TextField, 'e.g. Chicken'),
@@ -607,7 +649,12 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Rs 5,000'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, 'Set limit'));
+    // The button lands a pixel below a 780px viewport, so it has to be scrolled
+    // to before it can be tapped.
+    final setLimit = find.widgetWithText(FilledButton, 'Set limit');
+    await tester.ensureVisible(setLimit);
+    await tester.pumpAndSettle();
+    await tester.tap(setLimit);
     await tester.pumpAndSettle();
 
     final userId = app.auth.currentUser!.id;
@@ -1178,4 +1225,389 @@ void main() {
     await _revealText(tester, 'Paid from savings · not in the figures above');
     expect(find.text('Biggest: Building a house · Rs 92,500'), findsOneWidget);
   });
+
+  // --------------------------------------------------------------- family ---
+
+  testWidgets('a new account is asked who is in the house before anything '
+      'else', (tester) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const []);
+
+    expect(find.text('Who is in the house?'), findsOneWidget);
+    expect(
+      find.textContaining('Everyone uses this same login'),
+      findsOneWidget,
+    );
+    // Nothing to do until there is a name, and the button says so.
+    expect(find.text('Add at least one person'), findsOneWidget);
+    expect(app.store.hasMembers, isFalse);
+
+    await tester.tap(find.text('Abba'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Ammi'));
+    await tester.pumpAndSettle();
+
+    expect(app.store.members.map((m) => m.name).toList(), ['Abba', 'Ammi']);
+    expect(find.text('Done, start tracking'), findsOneWidget);
+
+    await tester.tap(find.text('Done, start tracking'));
+    await tester.pumpAndSettle();
+    expect(find.text('Who is in the house?'), findsNothing);
+  });
+
+  testWidgets('the same name cannot be added twice', (tester) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const []);
+
+    await tester.tap(find.text('Abba'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'e.g. Abba'),
+      'abba',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Add this person'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('abba is already on the list'), findsOneWidget);
+    expect(app.store.members.length, 1);
+  });
+
+  testWidgets('an expense will not save until a person is picked', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba', 'Ammi']);
+
+    await tester.tap(find.byType(FloatingActionButton));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).first, '1250');
+    await tester.pumpAndSettle();
+
+    final save = find.widgetWithText(FilledButton, 'Add expense');
+    await tester.ensureVisible(save);
+    await tester.pumpAndSettle();
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pick who spent this'), findsOneWidget);
+    expect(app.store.totalEntryCount, 0, reason: 'nothing was saved');
+
+    // Pick one and the same button now works. Scrolling to the save button
+    // pushed the picker above the fold, so it has to be brought back.
+    final ammi = find.text('Ammi');
+    await tester.ensureVisible(ammi);
+    await tester.pumpAndSettle();
+    await tester.tap(ammi);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(save);
+    await tester.pumpAndSettle();
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+
+    expect(app.store.totalEntryCount, 1);
+    final saved = app.store.allExpenses.single;
+    expect(_memberName(app, saved.memberId), 'Ammi');
+  });
+
+  testWidgets('with one person in the house nothing has to be picked', (
+    tester,
+  ) async {
+    // Not a guess: with a single member there is exactly one possible answer.
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba']);
+
+    await _addExpenseThroughUi(tester, amount: '1250', item: 'Chicken');
+
+    expect(app.store.totalEntryCount, 1);
+    expect(
+      _memberName(app, app.store.allExpenses.single.memberId),
+      'Abba',
+    );
+  });
+
+  testWidgets('the Insights tab ranks who spent how much', (tester) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba', 'Ammi']);
+
+    await _addExpenseThroughUi(
+      tester,
+      amount: '6000',
+      item: 'Chicken',
+      person: 'Abba',
+    );
+    await _addExpenseThroughUi(
+      tester,
+      amount: '2000',
+      item: 'Petrol',
+      person: 'Ammi',
+    );
+
+    await tester.tap(_tab(1));
+    await tester.pumpAndSettle();
+    await _revealText(tester, 'Spent by person');
+
+    expect(find.text('Rs 6,000'), findsWidgets);
+    expect(find.text('75%'), findsOneWidget);
+    expect(find.text('25%'), findsOneWidget);
+
+    final rows = app.store.spendByMemberThisPeriod;
+    expect(rows.map((r) => r.name).toList(), ['Abba', 'Ammi']);
+    expect(rows.first.total, 6000);
+    expect(rows.last.total, 2000);
+  });
+
+  testWidgets('expenses from before the family existed read as Not set', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba']);
+    final userId = app.auth.currentUser!.id;
+
+    // Seeded straight onto the server with no member, the way every expense
+    // logged before this feature existed looks.
+    app.api.seed(userId, _sampleExpenses(DateTime.now()));
+    await app.store.sync();
+    await tester.pumpAndSettle();
+
+    expect(app.store.unassignedExpenseCount, 3);
+    final rows = app.store.spendByMemberThisPeriod;
+    expect(rows.last.unassigned, isTrue);
+    expect(rows.last.name, 'Not set');
+    expect(rows.last.count, 3, reason: 'all three fall in this month');
+
+    await tester.tap(_tab(1));
+    await tester.pumpAndSettle();
+    await _revealText(tester, 'Spent by person');
+    expect(find.text('Not set'), findsOneWidget);
+  });
+
+  testWidgets('the Expenses tab filters down to one person', (tester) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba', 'Ammi']);
+
+    await _addExpenseThroughUi(
+      tester,
+      amount: '6000',
+      item: 'Chicken',
+      person: 'Abba',
+    );
+    await _addExpenseThroughUi(
+      tester,
+      amount: '2000',
+      item: 'Petrol',
+      person: 'Ammi',
+    );
+
+    await tester.tap(_tab(2));
+    await tester.pumpAndSettle();
+    expect(find.text('Chicken'), findsOneWidget);
+    expect(find.text('Petrol'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(GestureDetector, 'Abba').first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Chicken'), findsOneWidget);
+    expect(find.text('Petrol'), findsNothing);
+    expect(find.textContaining('1 of 2'), findsOneWidget);
+
+    // Everyone puts it back.
+    await tester.tap(find.text('Everyone'));
+    await tester.pumpAndSettle();
+    expect(find.text('Petrol'), findsOneWidget);
+    expect(app.store.totalEntryCount, 2);
+  });
+
+  testWidgets('removing a person keeps their spending in the totals', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba', 'Ammi']);
+    final userId = app.auth.currentUser!.id;
+
+    await _addExpenseThroughUi(
+      tester,
+      amount: '6000',
+      item: 'Chicken',
+      person: 'Abba',
+    );
+    final totalBefore = app.store.summary.total;
+    final abba = app.store.members.firstWhere((m) => m.name == 'Abba');
+
+    await app.store.deleteMember(abba.id);
+    await tester.pumpAndSettle();
+
+    expect(app.store.members.map((m) => m.name).toList(), ['Ammi']);
+    expect(app.store.summary.total, totalBefore, reason: 'money is not lost');
+    expect(app.store.totalEntryCount, 1);
+    expect(app.store.allExpenses.single.memberId, isNull);
+    expect(app.store.unassignedExpenseCount, 1);
+
+    // And the server agrees, with no foreign key left dangling.
+    expect(app.store.syncError, isNull);
+    expect(app.store.pendingCount, 0);
+    expect(app.members.rowsFor(userId).length, 1);
+    expect(app.api.rowsFor(userId).single.memberId, isNull);
+  });
+
+  testWidgets('a family set up offline reaches the server on reconnect', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba']);
+    final userId = app.auth.currentUser!.id;
+
+    app.api.offline = true;
+    app.budgets.offline = true;
+    app.incomes.offline = true;
+    app.projects.offline = true;
+    app.members.offline = true;
+    app.online.add(false);
+    await tester.pumpAndSettle();
+
+    final ammi = await app.store.addMember('Ammi');
+    await app.store.create(
+      amount: 3200,
+      category: ExpenseCategory.groceries,
+      date: DateTime.now(),
+      item: 'Mutton',
+      note: '',
+      memberId: ammi.id,
+    );
+    await tester.pumpAndSettle();
+
+    expect(app.store.members.length, 2, reason: 'usable with no network');
+    expect(
+      app.members.rowsFor(userId).length,
+      1,
+      reason: 'Abba synced before the connection dropped, Ammi did not',
+    );
+
+    app.api.offline = false;
+    app.budgets.offline = false;
+    app.incomes.offline = false;
+    app.projects.offline = false;
+    app.members.offline = false;
+    app.online.add(true);
+    await tester.pumpAndSettle();
+
+    expect(app.store.syncError, isNull);
+    expect(app.store.pendingCount, 0);
+    expect(app.members.rowsFor(userId).length, 2);
+    expect(app.api.rowsFor(userId).single.memberId, ammi.id);
+  });
+
+  testWidgets('renaming a person after logging against them still pushes', (
+    tester,
+  ) async {
+    // The queue collapses a repeated edit by moving that row's op to the back,
+    // so the rename lands behind the expense that names it. Without parents
+    // first, the expense would be pushed to a server that has never heard of
+    // the member and be rejected.
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba']);
+    final userId = app.auth.currentUser!.id;
+
+    app.api.offline = true;
+    app.budgets.offline = true;
+    app.incomes.offline = true;
+    app.projects.offline = true;
+    app.members.offline = true;
+    app.online.add(false);
+    await tester.pumpAndSettle();
+
+    final bhai = await app.store.addMember('Bhai');
+    await app.store.create(
+      amount: 900,
+      category: ExpenseCategory.dining,
+      date: DateTime.now(),
+      item: 'Chai',
+      note: '',
+      memberId: bhai.id,
+    );
+    // The rename lands *after* the expense in the queue.
+    await app.store.saveMember(bhai.copyWith(name: 'Hamza'));
+    await tester.pumpAndSettle();
+
+    app.api.offline = false;
+    app.budgets.offline = false;
+    app.incomes.offline = false;
+    app.projects.offline = false;
+    app.members.offline = false;
+    app.online.add(true);
+    await tester.pumpAndSettle();
+
+    expect(app.store.syncError, isNull);
+    expect(app.store.pendingCount, 0);
+    expect(
+      app.members.rowsFor(userId).map((m) => m.name).toList(),
+      ['Abba', 'Hamza'],
+    );
+    expect(app.api.rowsFor(userId).single.memberId, bhai.id);
+  });
+
+  testWidgets('a person removed offline does not strand their expenses', (
+    tester,
+  ) async {
+    // Both made offline, so neither reached the server. A queued expense still
+    // naming the removed member would be rejected by the foreign key.
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba']);
+    final userId = app.auth.currentUser!.id;
+
+    app.api.offline = true;
+    app.budgets.offline = true;
+    app.incomes.offline = true;
+    app.projects.offline = true;
+    app.members.offline = true;
+    app.online.add(false);
+    await tester.pumpAndSettle();
+
+    final guest = await app.store.addMember('Guest');
+    await app.store.create(
+      amount: 400,
+      category: ExpenseCategory.dining,
+      date: DateTime.now(),
+      item: 'Samosa',
+      note: '',
+      memberId: guest.id,
+    );
+    await app.store.deleteMember(guest.id);
+    await tester.pumpAndSettle();
+
+    expect(app.store.allExpenses.single.memberId, isNull);
+
+    app.api.offline = false;
+    app.budgets.offline = false;
+    app.incomes.offline = false;
+    app.projects.offline = false;
+    app.members.offline = false;
+    app.online.add(true);
+    await tester.pumpAndSettle();
+
+    expect(app.store.syncError, isNull);
+    expect(app.store.pendingCount, 0);
+    expect(app.members.rowsFor(userId).map((m) => m.name).toList(), ['Abba']);
+    expect(app.api.rowsFor(userId).single.memberId, isNull);
+  });
+
+  testWidgets('the family list is reachable from the account menu', (
+    tester,
+  ) async {
+    await _bootApp(tester);
+    await _register(tester, family: const ['Abba']);
+
+    await tester.tap(find.byKey(const ValueKey('account_menu')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Family members'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Family members'), findsOneWidget);
+    expect(find.textContaining('Everyone shares this login'), findsOneWidget);
+  });
 }
+
+/// Reads a member name off the store, for assertions.
+String? _memberName(_Harness app, String? id) =>
+    app.store.memberById(id)?.name;
