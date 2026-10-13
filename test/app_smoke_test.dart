@@ -7,6 +7,7 @@ import 'package:finance/data/local_prefs.dart';
 import 'package:finance/models/budget.dart';
 import 'package:finance/models/expense.dart';
 import 'package:finance/models/expense_category.dart';
+import 'package:finance/models/vehicle.dart';
 import 'package:finance/screens/home_shell.dart';
 import 'package:finance/state/auth_controller.dart';
 import 'package:finance/state/expense_store.dart';
@@ -1610,6 +1611,247 @@ void main() {
 
     expect(find.text('Family members'), findsOneWidget);
     expect(find.textContaining('Everyone shares this login'), findsOneWidget);
+  });
+
+  // ------------------------------------------------------------- vehicles ---
+
+  testWidgets('a car is added from the tab and opens on its logbook', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+
+    await tester.tap(_tab(HomeShell.vehiclesTab));
+    await tester.pumpAndSettle();
+    expect(find.text('No vehicles yet'), findsOneWidget);
+
+    await tester.tap(find.text('Add a vehicle'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'e.g. Honda City'),
+      'Honda City',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextField, 'e.g. 42150'),
+      '42150',
+    );
+    await tester.pumpAndSettle();
+    final add = find.widgetWithText(FilledButton, 'Add vehicle');
+    await tester.ensureVisible(add);
+    await tester.pumpAndSettle();
+    await tester.tap(add);
+    await tester.pumpAndSettle();
+
+    expect(app.store.vehicles.single.name, 'Honda City');
+    expect(app.store.vehicles.single.currentKm, 42150);
+    expect(app.vehicles.vehiclesFor(userId).single.odometer, 42150);
+    // Straight into the logbook, not back to a list.
+    expect(find.text('42,150 km'), findsOneWidget);
+    expect(find.text('Next service'), findsOneWidget);
+  });
+
+  testWidgets('picking Tuning fills its interval and works out the next due', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+    final bike = await app.store.createVehicle(
+      name: 'CD 70',
+      kind: VehicleKind.bike,
+      odometer: 18000,
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(_tab(HomeShell.vehiclesTab));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('CD 70'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Log service'));
+    await tester.pumpAndSettle();
+
+    // The bike presets, not the car ones.
+    await tester.tap(find.text('Tuning'));
+    await tester.pumpAndSettle();
+    final values = tester
+        .widgetList<EditableText>(find.byType(EditableText))
+        .map((field) => field.controller.text);
+    expect(values, containsAll(['Tuning', '18000', '3000', '6']));
+
+    await tester.enterText(find.widgetWithText(TextField, '2500'), '1500');
+    await tester.pumpAndSettle();
+    final save = find.widgetWithText(FilledButton, 'Save service');
+    await tester.ensureVisible(save);
+    await tester.pumpAndSettle();
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+
+    final summary = app.store.vehicleById(bike.id)!;
+    final record = summary.services.single;
+    expect(record.service, 'Tuning');
+    expect(record.odometer, 18000, reason: 'prefilled from the reading');
+    expect(record.cost, 1500);
+    expect(record.intervalKm, 3000);
+    expect(record.intervalMonths, 6);
+    expect(summary.nextDue!.dueKm, 21000);
+    expect(summary.nextDue!.status, DueStatus.ok);
+    expect(app.vehicles.servicesFor(userId).single.cost, 1500);
+    expect(find.textContaining('in 3,000 km'), findsWidgets);
+  });
+
+  testWidgets('service costs stay out of the monthly figures', (tester) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+    app.api.seed(userId, _sampleExpenses(DateTime.now()));
+    await app.store.sync();
+    await app.store.saveIncome(DateTime.now(), 120000);
+    await tester.pumpAndSettle();
+
+    final spentBefore = app.store.summary.total;
+    final savedBefore = app.store.monthMoney(DateTime.now()).saved;
+    final fuelBefore = app.store.spentThisMonth(ExpenseCategory.fuel);
+
+    final car = await app.store.createVehicle(
+      name: 'Honda City',
+      kind: VehicleKind.car,
+      odometer: 42000,
+    );
+    await app.store.addVehicleService(
+      vehicleId: car.id,
+      service: 'Tuning',
+      date: DateTime.now(),
+      odometer: 42000,
+      cost: 8500,
+      intervalKm: 10000,
+    );
+    await tester.pumpAndSettle();
+
+    expect(app.store.vehiclesTotalCost, 8500);
+    expect(app.store.summary.total, spentBefore);
+    expect(app.store.monthMoney(DateTime.now()).saved, savedBefore);
+    expect(app.store.spentThisMonth(ExpenseCategory.fuel), fuelBefore);
+  });
+
+  testWidgets('the Overview flags a service that has come due', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    expect(find.text('Vehicle service'), findsNothing);
+
+    final car = await app.store.createVehicle(
+      name: 'Honda City',
+      kind: VehicleKind.car,
+      odometer: 47200,
+    );
+    await app.store.addVehicleService(
+      vehicleId: car.id,
+      service: 'Engine oil change',
+      date: DateTime.now(),
+      odometer: 42000,
+      intervalKm: 5000,
+    );
+    await tester.pumpAndSettle();
+
+    await _revealText(tester, 'Vehicle service');
+    expect(find.text('1 job needs attention'), findsOneWidget);
+    expect(
+      find.textContaining('Honda City · Engine oil change'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('200 km over'), findsOneWidget);
+  });
+
+  testWidgets('a vehicle logged offline reaches the server on reconnect', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+
+    app.api.offline = true;
+    app.budgets.offline = true;
+    app.incomes.offline = true;
+    app.projects.offline = true;
+    app.members.offline = true;
+    app.vehicles.offline = true;
+    app.online.add(false);
+    await tester.pumpAndSettle();
+
+    final car = await app.store.createVehicle(
+      name: 'Honda City',
+      kind: VehicleKind.car,
+    );
+    await app.store.addVehicleService(
+      vehicleId: car.id,
+      service: 'Tuning',
+      date: DateTime.now(),
+      odometer: 42000,
+      cost: 8500,
+    );
+    // Editing the vehicle after logging against it moves its op to the back of
+    // the queue; it must still reach the server before its service record.
+    await app.store.saveVehicle(
+      app.store.vehicleById(car.id)!.vehicle.copyWith(plate: 'LEB-1234'),
+    );
+    await tester.pumpAndSettle();
+
+    expect(app.store.vehiclesTotalCost, 8500, reason: 'usable offline');
+    expect(app.vehicles.vehiclesFor(userId), isEmpty);
+
+    app.api.offline = false;
+    app.budgets.offline = false;
+    app.incomes.offline = false;
+    app.projects.offline = false;
+    app.members.offline = false;
+    app.vehicles.offline = false;
+    app.online.add(true);
+    await tester.pumpAndSettle();
+
+    expect(app.store.syncError, isNull);
+    expect(app.store.pendingCount, 0);
+    expect(app.vehicles.vehiclesFor(userId).single.plate, 'LEB-1234');
+    expect(app.vehicles.servicesFor(userId).single.cost, 8500);
+    expect(app.store.vehiclesTotalCost, 8500, reason: 'no duplicates');
+  });
+
+  testWidgets('deleting a vehicle takes its history with it, here and there', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+    final car = await app.store.createVehicle(
+      name: 'Honda City',
+      kind: VehicleKind.car,
+    );
+    await app.store.addVehicleService(
+      vehicleId: car.id,
+      service: 'Tuning',
+      date: DateTime.now(),
+      odometer: 42000,
+      cost: 8500,
+    );
+    await tester.pumpAndSettle();
+    expect(app.vehicles.servicesFor(userId), hasLength(1));
+
+    await tester.tap(_tab(HomeShell.vehiclesTab));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Honda City'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.more_vert_rounded));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete vehicle'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Delete vehicle'));
+    await tester.pumpAndSettle();
+
+    expect(app.store.hasVehicles, isFalse);
+    expect(app.vehicles.vehiclesFor(userId), isEmpty);
+    expect(app.vehicles.servicesFor(userId), isEmpty);
+    expect(find.text('No vehicles yet'), findsOneWidget);
   });
 }
 
