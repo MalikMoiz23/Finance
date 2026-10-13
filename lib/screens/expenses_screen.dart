@@ -5,14 +5,18 @@ import '../core/app_theme.dart';
 import '../core/error_messages.dart';
 import '../core/formatters.dart';
 import '../models/expense.dart';
+import '../models/analytics.dart';
 import '../models/expense_category.dart';
 import '../state/expense_store.dart';
 import '../widgets/empty_state.dart';
+import '../widgets/category_breakdown.dart';
 import '../widgets/expense_tile.dart';
+import '../widgets/member_filter_bar.dart';
 import '../widgets/period_filter_bar.dart';
 import '../widgets/pressable.dart';
 import '../widgets/section_card.dart';
 import 'expense_editor_sheet.dart';
+import 'member_breakdown.dart';
 
 /// The table view of the data: every expense in the selected period, grouped by
 /// day, searchable, filterable by category. Anything a chart only shows as a
@@ -40,11 +44,6 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
   String _query = '';
   ExpenseCategory? _category;
 
-  /// Null shows everyone. [_unassignedFilter] is the sentinel for "Not set",
-  /// which is a real thing to filter by and not the same as no filter at all.
-  String? _memberId;
-  static const _unassignedFilter = '__none__';
-
   /// Search the whole history instead of just the selected period.
   bool _allTime = false;
   _Sort _sort = _Sort.newest;
@@ -56,18 +55,9 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
   }
 
   bool _matches(Expense expense, ExpenseStore store) {
+    // The person filter is applied by the store, so it agrees with every
+    // other screen; only the category and the search are local to this list.
     if (_category != null && expense.category != _category) return false;
-    final person = _memberId;
-    if (person != null) {
-      // An id whose person has been removed reads as unattributed, matching
-      // what the breakdown and the rows themselves show.
-      final actual = store.memberById(expense.memberId)?.id;
-      if (person == _unassignedFilter) {
-        if (actual != null) return false;
-      } else if (actual != person) {
-        return false;
-      }
-    }
     if (_query.isEmpty) return true;
     final q = _query.toLowerCase();
     return expense.item.toLowerCase().contains(q) ||
@@ -83,7 +73,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
     final store = context.watch<ExpenseStore>();
     final summary = store.summary;
 
-    final source = _allTime ? store.allExpenses : summary.expenses;
+    final source = _allTime ? store.scopedExpenses : summary.expenses;
     final filtered = source.where((e) => _matches(e, store)).toList();
     if (_sort == _Sort.biggest) {
       filtered.sort((a, b) => b.amount.compareTo(a.amount));
@@ -136,7 +126,7 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
                             _allTime
                                 ? '${filtered.length} of ${store.totalEntryCount} '
                                       'all time · ${Money.format(filteredTotal)}'
-                                : '${filtered.length} of ${summary.count} in this '
+                                : '${filtered.length} of ${store.householdPeriodCount} in this '
                                       '${store.period.noun} · ${Money.format(filteredTotal)}',
                             style: context.text.bodySmall?.copyWith(
                               color: viz.inkMuted,
@@ -209,50 +199,11 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
           // People first: "what did Abba spend" is a whole-list question, where
           // a category is a slice of whatever list you are already looking at.
           if (store.hasMembers)
-            SliverToBoxAdapter(
+            const SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: AppSizes.gutter,
-                  ),
-                  child: Row(
-                    children: [
-                      _FilterPill(
-                        label: 'Everyone',
-                        icon: Icons.groups_rounded,
-                        selected: _memberId == null,
-                        onTap: () => setState(() => _memberId = null),
-                      ),
-                      for (final member in store.members) ...[
-                        const SizedBox(width: 8),
-                        _FilterPill(
-                          label: member.name,
-                          icon: Icons.person_rounded,
-                          selected: _memberId == member.id,
-                          onTap: () => setState(
-                            () => _memberId = _memberId == member.id
-                                ? null
-                                : member.id,
-                          ),
-                        ),
-                      ],
-                      if (store.unassignedExpenseCount > 0) ...[
-                        const SizedBox(width: 8),
-                        _FilterPill(
-                          label: 'Not set',
-                          icon: Icons.help_outline_rounded,
-                          selected: _memberId == _unassignedFilter,
-                          onTap: () => setState(
-                            () => _memberId = _memberId == _unassignedFilter
-                                ? null
-                                : _unassignedFilter,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
+                padding: EdgeInsets.only(bottom: 10),
+                child: MemberFilterBar(
+                  padding: EdgeInsets.symmetric(horizontal: AppSizes.gutter),
                 ),
               ),
             ),
@@ -262,14 +213,14 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
               padding: const EdgeInsets.symmetric(horizontal: AppSizes.gutter),
               child: Row(
                 children: [
-                  _FilterPill(
+                  FilterPill(
                     label: 'All',
                     selected: _category == null,
                     onTap: () => setState(() => _category = null),
                   ),
                   for (final category in ExpenseCategory.values) ...[
                     const SizedBox(width: 8),
-                    _FilterPill(
+                    FilterPill(
                       label: category.label,
                       dotColor: category.colorOf(context),
                       selected: _category == category,
@@ -283,6 +234,28 @@ class _ExpensesScreenState extends State<ExpensesScreen> {
               ),
             ),
           ),
+          // Only once something narrows the list: unfiltered, the line under
+          // the title already carries the total, and the per-category split
+          // is on the Overview.
+          if (filtered.isNotEmpty &&
+              (_category != null ||
+                  store.isMemberFiltered ||
+                  _query.isNotEmpty))
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(
+                AppSizes.gutter,
+                14,
+                AppSizes.gutter,
+                0,
+              ),
+              sliver: SliverToBoxAdapter(
+                child: _TotalsCard(
+                  expenses: filtered,
+                  total: filteredTotal,
+                  category: _category,
+                ),
+              ),
+            ),
           if (rows.isEmpty)
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(
@@ -509,68 +482,124 @@ class _ToolChip extends StatelessWidget {
   }
 }
 
-class _FilterPill extends StatelessWidget {
-  const _FilterPill({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-    this.dotColor,
-    this.icon,
+/// The total of exactly what the list below shows, and how it splits.
+///
+/// With no category picked it splits by category — what went on groceries,
+/// what on fuel — so the biggest use of the money is the first row. With a
+/// category picked and everyone shown, it splits that category by person.
+/// The split starts folded so the list stays in view; the total itself is
+/// always on show.
+class _TotalsCard extends StatefulWidget {
+  const _TotalsCard({
+    required this.expenses,
+    required this.total,
+    required this.category,
   });
 
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-  final Color? dotColor;
+  final List<Expense> expenses;
+  final double total;
+  final ExpenseCategory? category;
 
-  /// Used by the people row, where there is no category colour to show a dot
-  /// for and the pills need something to tell them apart from the row below.
-  final IconData? icon;
+  @override
+  State<_TotalsCard> createState() => _TotalsCardState();
+}
+
+class _TotalsCardState extends State<_TotalsCard> {
+  bool _open = false;
 
   @override
   Widget build(BuildContext context) {
     final viz = context.viz;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: selected ? viz.inkPrimary : viz.surface,
-          borderRadius: BorderRadius.circular(13),
-          border: Border.all(color: selected ? viz.inkPrimary : viz.hairline),
-        ),
-        child: Row(
-          children: [
-            if (dotColor != null) ...[
-              Container(
-                width: 9,
-                height: 9,
-                decoration: BoxDecoration(
-                  color: dotColor,
-                  shape: BoxShape.circle,
+    final store = context.watch<ExpenseStore>();
+    final count = widget.expenses.length;
+
+    final Widget? split;
+    final String splitTitle;
+    if (widget.category == null) {
+      splitTitle = 'By category';
+      split = CategoryBreakdown(slices: Analytics.slicesOf(widget.expenses));
+    } else if (store.hasMembers && !store.isMemberFiltered) {
+      splitTitle = 'By person · ${widget.category!.label}';
+      split = MemberBreakdown(
+        rows: store.spendByMember(widget.expenses),
+        onSelect: store.setMemberFilter,
+      );
+    } else {
+      splitTitle = '';
+      split = null;
+    }
+    final open = _open;
+    final who = store.memberFilterLabel;
+
+    return SectionCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      [
+                        'TOTAL',
+                        if (who != null) who.toUpperCase(),
+                        if (widget.category != null)
+                          widget.category!.label.toUpperCase(),
+                      ].join(' · '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.text.labelSmall?.copyWith(
+                        color: viz.inkMuted,
+                        letterSpacing: 0.6,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      Money.format(widget.total),
+                      style: context.text.titleMedium?.copyWith(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.8,
+                        color: viz.inkPrimary,
+                      ),
+                    ),
+                    Text(
+                      '$count ${count == 1 ? 'entry' : 'entries'}',
+                      style: context.text.labelSmall?.copyWith(
+                        color: viz.inkMuted,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 7),
+              if (split != null)
+                TextButton.icon(
+                  onPressed: () => setState(() => _open = !open),
+                  icon: Icon(
+                    open
+                        ? Icons.expand_less_rounded
+                        : Icons.expand_more_rounded,
+                    size: 18,
+                  ),
+                  label: Text(open ? 'Hide' : 'Breakdown'),
+                  style: TextButton.styleFrom(foregroundColor: viz.series),
+                ),
             ],
-            if (icon != null) ...[
-              Icon(
-                icon,
-                size: 15,
-                color: selected ? viz.surface : viz.inkMuted,
-              ),
-              const SizedBox(width: 6),
-            ],
+          ),
+          if (split != null && open) ...[
+            const SizedBox(height: 14),
             Text(
-              label,
-              style: context.text.labelLarge?.copyWith(
-                color: selected ? viz.surface : viz.inkSecondary,
-                fontWeight: FontWeight.w600,
-              ),
+              splitTitle,
+              style: context.text.titleSmall?.copyWith(fontSize: 14),
             ),
+            const SizedBox(height: 12),
+            split,
           ],
-        ),
+        ],
       ),
     );
   }

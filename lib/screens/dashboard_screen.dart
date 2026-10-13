@@ -17,6 +17,7 @@ import '../widgets/empty_state.dart';
 import '../widgets/entrance.dart';
 import '../widgets/expense_tile.dart';
 import '../widgets/hero_total_card.dart';
+import '../widgets/member_filter_bar.dart';
 import '../widgets/pay_card.dart';
 import '../widgets/period_filter_bar.dart';
 import '../widgets/pressable.dart';
@@ -26,6 +27,7 @@ import '../widgets/trend_bar_chart.dart';
 import 'expense_editor_sheet.dart';
 import 'family_members_sheet.dart';
 import 'income_sheet.dart';
+import 'member_breakdown.dart';
 import 'home_shell.dart';
 import 'vehicles_screen.dart';
 
@@ -39,6 +41,7 @@ class DashboardScreen extends StatelessWidget {
     final store = context.watch<ExpenseStore>();
     final summary = store.summary;
     final scope = store.relativeRangeLabel ?? store.rangeLabel;
+    final who = store.memberFilterLabel;
 
     // First load for this account: no cache to fall back on yet.
     final loadingEmpty = store.isLoading && store.totalEntryCount == 0;
@@ -67,12 +70,22 @@ class DashboardScreen extends StatelessWidget {
           ],
           const SizedBox(height: 20),
           const Entrance(index: 0, child: PeriodFilterBar()),
+          if (store.hasMembers) ...[
+            const SizedBox(height: 12),
+            const Entrance(index: 0, child: MemberFilterBar()),
+          ],
+          if (who != null) ...[
+            const SizedBox(height: 10),
+            const MemberFilterNote(),
+          ],
           const SizedBox(height: 18),
           Entrance(
             index: 1,
             child: HeroTotalCard(
               summary: summary,
-              label: 'Total spent · $scope',
+              label: who == null
+                  ? 'Total spent · $scope'
+                  : 'Spent by $who · $scope',
             ),
           ),
           const SizedBox(height: AppSizes.gap),
@@ -110,13 +123,10 @@ class DashboardScreen extends StatelessWidget {
           Entrance(
             index: 5,
             child: SectionCard(
-              title: 'Where it went',
+              title: who == null ? 'Where it went' : 'Where $who spent it',
               subtitle: summary.isEmpty
                   ? null
-                  : '${summary.slices.length} of 8 categories used',
-              trailing: summary.slices.length > 5
-                  ? CardAction(label: 'All', onTap: () => onOpenTab(1))
-                  : null,
+                  : 'Total per category · biggest first',
               child: loadingEmpty
                   ? const _CardLoading()
                   : summary.isEmpty
@@ -127,9 +137,25 @@ class DashboardScreen extends StatelessWidget {
                       message:
                           'Every expense you add is grouped by category here.',
                     )
-                  : CategoryBreakdown(slices: summary.slices, maxRows: 5),
+                  : CategoryBreakdown(slices: summary.slices),
             ),
           ),
+          // Who spent it, next to what it went on. Hidden while one person is
+          // picked: a ranking of one answers nothing.
+          if (store.hasMembers && who == null && !summary.isEmpty) ...[
+            const SizedBox(height: AppSizes.gap),
+            Entrance(
+              index: 5,
+              child: SectionCard(
+                title: 'Who spent it',
+                subtitle: 'Tap a person to see only their spending',
+                child: MemberBreakdown(
+                  rows: store.spendByMemberThisPeriod,
+                  onSelect: store.setMemberFilter,
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: AppSizes.gap),
           Entrance(
             index: 6,

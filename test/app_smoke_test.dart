@@ -12,6 +12,7 @@ import 'package:finance/screens/home_shell.dart';
 import 'package:finance/state/auth_controller.dart';
 import 'package:finance/state/expense_store.dart';
 import 'package:finance/state/theme_controller.dart';
+import 'package:finance/widgets/section_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
@@ -187,7 +188,9 @@ Future<void> _addExpenseThroughUi(
   // form will not save until one is picked.
   if (person != null) {
     await tester.pumpAndSettle();
-    final chip = find.text(person);
+    // `.last`: the Overview's person filter shows the same name behind the
+    // sheet.
+    final chip = find.text(person).last;
     await tester.ensureVisible(chip);
     await tester.pumpAndSettle();
     await tester.tap(chip);
@@ -279,7 +282,7 @@ void main() {
 
     expect(app.auth.currentUser?.email, _email);
     expect(app.auth.currentUser?.name, _name);
-    expect(find.textContaining('Abdul'), findsOneWidget); // greeting
+    expect(find.textContaining(', Abdul'), findsOneWidget); // greeting
     expect(find.text('Total spent · This month'), findsOneWidget);
     // A brand new account starts empty.
     expect(app.store.totalEntryCount, 0);
@@ -1302,7 +1305,7 @@ void main() {
 
     // Pick one and the same button now works. Scrolling to the save button
     // pushed the picker above the fold, so it has to be brought back.
-    final ammi = find.text('Ammi');
+    final ammi = find.text('Ammi').last;
     await tester.ensureVisible(ammi);
     await tester.pumpAndSettle();
     await tester.tap(ammi);
@@ -1852,6 +1855,188 @@ void main() {
     expect(app.vehicles.vehiclesFor(userId), isEmpty);
     expect(app.vehicles.servicesFor(userId), isEmpty);
     expect(find.text('No vehicles yet'), findsOneWidget);
+  });
+
+  // --------------------------------------------------------- person filter ---
+
+  testWidgets('picking a person narrows every tab to their spending', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba', 'Ammi']);
+    await _addExpenseThroughUi(
+      tester,
+      amount: '6000',
+      item: 'Chicken',
+      person: 'Abba',
+    );
+    await _addExpenseThroughUi(
+      tester,
+      amount: '2000',
+      item: 'Petrol',
+      person: 'Ammi',
+    );
+    expect(app.store.summary.total, 8000);
+    await _revealText(tester, 'Who spent it');
+    await _toTop(tester);
+
+    // The pill row scrolls sideways; the test font is wide enough to push the
+    // third pill past the edge.
+    final ammi = find.widgetWithText(GestureDetector, 'Ammi').first;
+    await tester.ensureVisible(ammi);
+    await tester.pumpAndSettle();
+    await tester.tap(ammi);
+    await tester.pumpAndSettle();
+
+    expect(app.store.summary.total, 2000);
+    expect(find.text('Spent by Ammi · This month'), findsOneWidget);
+    expect(find.textContaining('Showing Ammi only'), findsOneWidget);
+    await _revealText(tester, 'Recent expenses');
+    expect(find.text('Who spent it'), findsNothing);
+    // The household ranking is not narrowed: one row would answer nothing.
+    expect(app.store.spendByMemberThisPeriod, hasLength(2));
+
+    // The choice follows to the other tabs, like the period does.
+    await tester.tap(_tab(1));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Ammi · Rs 2,000'), findsOneWidget);
+    await tester.tap(_tab(2));
+    await tester.pumpAndSettle();
+    expect(find.text('Petrol'), findsOneWidget);
+    expect(find.text('Chicken'), findsNothing);
+    expect(find.text('TOTAL · AMMI'), findsOneWidget);
+
+    await tester.tap(find.text('Everyone'));
+    await tester.pumpAndSettle();
+    expect(app.store.summary.total, 8000);
+    expect(app.store.memberFilter, isNull);
+  });
+
+  testWidgets('a person row on the Overview filters to that person', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba', 'Ammi']);
+    await _addExpenseThroughUi(
+      tester,
+      amount: '6000',
+      item: 'Chicken',
+      person: 'Abba',
+    );
+    await _addExpenseThroughUi(
+      tester,
+      amount: '2000',
+      item: 'Petrol',
+      person: 'Ammi',
+    );
+
+    await _revealText(tester, 'Who spent it');
+    await tester.tap(
+      find.descendant(
+        of: find.widgetWithText(SectionCard, 'Who spent it'),
+        matching: find.text('Abba'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(app.store.memberFilterLabel, 'Abba');
+    expect(app.store.summary.total, 6000);
+  });
+
+  testWidgets('the Overview gives every category its own total', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester);
+    final userId = app.auth.currentUser!.id;
+    final today = DateTime.now();
+    final amounts = {
+      ExpenseCategory.groceries: 4200.0,
+      ExpenseCategory.fuel: 2500.0,
+      ExpenseCategory.bills: 1800.0,
+      ExpenseCategory.dining: 900.0,
+      ExpenseCategory.health: 700.0,
+      ExpenseCategory.shopping: 300.0,
+    };
+    app.api.seed(userId, [
+      for (final entry in amounts.entries)
+        Expense(
+          id: 'seed-${entry.key.name}',
+          amount: entry.value,
+          category: entry.key,
+          date: today,
+        ),
+    ]);
+    await app.store.sync();
+    await tester.pumpAndSettle();
+
+    await _revealText(tester, 'Where it went');
+    // All six, not a top five: the smallest is still a number worth seeing.
+    await _revealText(tester, 'Shopping');
+    expect(find.text('Rs 300'), findsWidgets);
+    expect(app.store.summary.slices.map((s) => s.total).toList(), [
+      4200,
+      2500,
+      1800,
+      900,
+      700,
+      300,
+    ]);
+  });
+
+  testWidgets('the Expenses totals card splits a category by person', (
+    tester,
+  ) async {
+    await _bootApp(tester);
+    await _register(tester, family: const ['Abba', 'Ammi']);
+    await _addExpenseThroughUi(
+      tester,
+      amount: '6000',
+      item: 'Chicken',
+      person: 'Abba',
+    );
+    await _addExpenseThroughUi(
+      tester,
+      amount: '1500',
+      item: 'Eggs',
+      person: 'Ammi',
+    );
+
+    await tester.tap(_tab(2));
+    await tester.pumpAndSettle();
+    // Unfiltered, the line under the title carries the total.
+    expect(find.textContaining('TOTAL'), findsNothing);
+
+    await tester.tap(find.widgetWithText(GestureDetector, 'Groceries').first);
+    await tester.pumpAndSettle();
+    expect(find.text('TOTAL · GROCERIES'), findsOneWidget);
+    // Also the day header's total, so at least one.
+    expect(find.text('Rs 7,500'), findsWidgets);
+
+    // Lift it clear of the add button floating over the list.
+    await tester.drag(_verticalScroll, const Offset(0, -250));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Breakdown'));
+    await tester.pumpAndSettle();
+    expect(find.text('By person · Groceries'), findsOneWidget);
+    expect(find.text('80%'), findsOneWidget);
+    expect(find.text('20%'), findsOneWidget);
+  });
+
+  testWidgets('removing the person being shown goes back to everyone', (
+    tester,
+  ) async {
+    final app = await _bootApp(tester);
+    await _register(tester, family: const ['Abba', 'Ammi']);
+    final abba = app.store.members.firstWhere((m) => m.name == 'Abba');
+
+    app.store.setMemberFilter(abba.id);
+    await tester.pumpAndSettle();
+    expect(app.store.isMemberFiltered, isTrue);
+
+    await app.store.deleteMember(abba.id);
+    await tester.pumpAndSettle();
+    expect(app.store.memberFilter, isNull);
   });
 }
 
