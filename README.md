@@ -16,8 +16,9 @@ expenses.
    run time with `--dart-define=SUPABASE_ANON_KEY=eyJ…`. That key is meant to be
    public; **never put the `service_role` key in this app**.
 2. **Schema** — *SQL Editor* → paste and run [supabase/schema.sql](supabase/schema.sql).
-   It creates the `expenses` table, its index, and the four RLS policies. Safe to
-   re-run.
+   It creates every table (expenses, budgets, pay, family members, projects,
+   vehicles and their service records), their indexes and RLS policies. Safe to
+   re-run, so run it again after pulling a version that adds tables.
 3. **Email confirmation** — *Authentication → Sign In / Providers* → turn
    **Confirm email** off, so registering logs you straight in. (If you leave it
    on, the app shows a "confirm your email" notice instead — both paths work.)
@@ -30,7 +31,7 @@ instead of failing on the first request.
 ```bash
 flutter pub get
 flutter run              # pick a device; also runs on Windows/Chrome
-flutter test             # 25 tests: aggregation maths + full-app widget tests
+flutter test             # 135 tests: model maths + full-app widget tests
 flutter analyze
 ```
 
@@ -45,6 +46,25 @@ expenses** deletes every row in the signed-in account.
 | **Insights** | Stat tiles (total, per day, biggest category, priciest weekday), category ranking with per-category change, spending by weekday, a **month calendar heatmap** with tap-to-inspect, most-bought items, biggest single spends |
 | **Expenses** | Every expense grouped by day with day totals; search items/notes/categories/amounts, **all-time or this-period**, sort by newest or biggest, filter by category, tap to edit, swipe left to delete (with undo), swipe right to log it again today |
 | **Budgets** | A monthly limit per category with presets; meters that band at 80% and 100% (*On track → Close to limit → Over budget*), what's left, and a safe amount per remaining day |
+| **Projects** | One-off spending paid from savings (building a house, a wedding) — a separate ledger with its own totals, stages and estimate |
+| **Vehicles** | Car and bike logbook: every tuning and service with date, odometer and cost, and when each job is due next |
+
+## Who spent it
+
+Every expense names the family member who spent it. A person filter (**Everyone · Abba · Ammi · …**) sits under the period filter on Overview, Insights and Expenses. Picking someone narrows every card on all three tabs at once — total, trend, categories, calendar, lists — the same way the period does. Pay and budgets stay household-wide, and the screen says so.
+
+- **Overview** lists **every category with its own total** (groceries, fuel, bills…), biggest first, and a *Who spent it* card ranking each person's total. Tap a person to filter to them.
+- **Expenses**: once a person, category or search narrows the list, a totals card shows exactly what the list adds up to, and splits it — by category, or, with a category picked, by person.
+
+## Vehicles
+
+A maintenance logbook for the household's cars and bikes:
+
+- Log a **tuning, oil change, filter, brake job…** with its date, the **odometer reading**, the cost and the workshop.
+- Picking a job fills its usual interval (bike tuning every 3,000 km or 6 months, car oil every 5,000 km or 6 months…). The fields stay editable — what the mechanic said is what is saved, on the record itself.
+- **Next due = km interval or month interval, whichever comes first**, measured against the vehicle's current reading (the highest one logged). Jobs are *On schedule*, *Due soon* (within 10% of the km interval or 14 days) or *Overdue*.
+- The Overview shows a *Vehicle service* reminder only when something needs attention.
+- **Separate ledger**: service costs never enter monthly spending, budgets or savings, the same rule as Projects. Fuel stays an everyday expense.
 
 ## Pay and savings
 
@@ -84,6 +104,8 @@ lib/
     expense_category.dart       the 8 categories + their fixed palette slots
     period.dart                 Week/Month/Year, half-open DateRange, anchor maths
     analytics.dart              pure aggregation -> PeriodSummary (unit-tested)
+    vehicle.dart                vehicle, service record, next-due maths (unit-tested)
+    service_catalog.dart        usual car / bike service intervals
   data/
     auth_gateway.dart           AuthGateway interface + Supabase implementation
     expense_api.dart            ExpenseApi interface + Supabase implementation
@@ -111,9 +133,10 @@ tree.
 - **Reads**: the on-device cache paints first, then Supabase overwrites it. If
   the fetch fails, the cached numbers stay on screen and a banner appears with a
   Retry — the app stays readable with no connection.
-- **Writes**: straight to Supabase, awaited. A failure keeps the sheet open with
-  the reason, and a swipe-to-delete springs back if the server refused it.
-  Nothing is queued for later, so a write always needs internet.
+- **Writes**: land in the device's database (SQLite; browser storage on web)
+  and an outbox, so the app works fully offline. The outbox drains to Supabase
+  whenever a connection is available, parents (projects, people, vehicles)
+  before the rows that point at them.
 - **Sessions** persist, so a returning user goes straight to the dashboard.
 - **Names** are stored in the auth user's metadata (`full_name`) — no profiles
   table, no trigger.
@@ -140,6 +163,5 @@ These are not stylistic preferences — changing them breaks accessibility:
 
 ## Not built yet
 
-Deliberately out of scope: income/balance, per-category budgets, recurring
-expenses, multi-currency, CSV export, password reset (needs redirect URLs and
-deep links), and offline writes (a sync queue).
+Deliberately out of scope: recurring expenses, multi-currency, and password
+reset (needs redirect URLs and deep links).
