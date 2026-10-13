@@ -27,6 +27,7 @@ import 'expense_editor_sheet.dart';
 import 'family_members_sheet.dart';
 import 'income_sheet.dart';
 import 'home_shell.dart';
+import 'vehicles_screen.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key, required this.onOpenTab});
@@ -171,6 +172,15 @@ class DashboardScreen extends StatelessWidget {
               child: _ProjectsSummary(store: store, onOpenTab: onOpenTab),
             ),
           ],
+          // Only when a vehicle actually needs something: a reminder that is
+          // always there stops being read.
+          if (store.vehicleAttention.isNotEmpty) ...[
+            const SizedBox(height: AppSizes.gap),
+            Entrance(
+              index: 8,
+              child: _VehicleReminder(store: store, onOpenTab: onOpenTab),
+            ),
+          ],
         ],
       ),
     );
@@ -232,6 +242,38 @@ class _ProjectsSummary extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: context.text.bodySmall?.copyWith(color: viz.inkSecondary),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Services that are overdue or close to it, across every vehicle.
+class _VehicleReminder extends StatelessWidget {
+  const _VehicleReminder({required this.store, required this.onOpenTab});
+
+  final ExpenseStore store;
+  final TabOpener onOpenTab;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = store.vehicleAttention;
+    final shown = items.take(3).toList();
+    return SectionCard(
+      title: 'Vehicle service',
+      subtitle:
+          '${items.length} ${items.length == 1 ? 'job needs' : 'jobs need'} '
+          'attention',
+      trailing: CardAction(
+        label: 'Open',
+        onTap: () => onOpenTab(HomeShell.vehiclesTab),
+      ),
+      child: Column(
+        children: [
+          for (var i = 0; i < shown.length; i++) ...[
+            if (i > 0) const SizedBox(height: 12),
+            DueLine(due: shown[i].due, prefix: shown[i].vehicle.name),
+          ],
         ],
       ),
     );

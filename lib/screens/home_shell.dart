@@ -14,6 +14,7 @@ import 'expenses_screen.dart';
 import 'family_members_sheet.dart';
 import 'insights_screen.dart';
 import 'projects_screen.dart';
+import 'vehicles_screen.dart';
 
 /// Lets a card deep-link to another tab ("See all" -> Expenses).
 typedef TabOpener = void Function(int index);
@@ -24,6 +25,9 @@ class HomeShell extends StatefulWidget {
   /// Index of the Projects tab. Cards elsewhere deep-link to it, and the button
   /// there starts a project instead of adding a daily expense.
   static const projectsTab = 4;
+
+  /// Index of the Vehicles tab, where the button adds a car or bike.
+  static const vehiclesTab = 5;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -130,11 +134,13 @@ class _HomeShellState extends State<HomeShell> {
               const _Keep(child: ExpensesScreen()),
               const _Keep(child: ScreenIntro(child: BudgetsScreen())),
               const _Keep(child: ScreenIntro(child: ProjectsScreen())),
+              const _Keep(child: ScreenIntro(child: VehiclesScreen())),
             ],
           ),
         ),
-        // On the Projects tab this button starts a project; everywhere else it
-        // adds a daily expense, and a long press repeats the last one outright.
+        // On the Projects tab this button starts a project, on Vehicles it adds
+        // a vehicle; everywhere else it adds a daily expense, and a long press
+        // repeats the last one outright.
         floatingActionButton: _index == HomeShell.projectsTab
             // Spelled out rather than a bare +: this tab adds a project, not an
             // expense, and the two are not interchangeable.
@@ -148,6 +154,18 @@ class _HomeShellState extends State<HomeShell> {
                 ),
                 icon: const Icon(Icons.add_rounded, size: 22),
                 label: const Text('New project'),
+              )
+            : _index == HomeShell.vehiclesTab
+            ? FloatingActionButton.extended(
+                onPressed: () => VehiclesScreen.start(context),
+                backgroundColor: viz.series,
+                foregroundColor: Colors.white,
+                elevation: 3,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                icon: const Icon(Icons.add_rounded, size: 22),
+                label: const Text('Add vehicle'),
               )
             : GestureDetector(
                 onLongPress: _repeatLast,
@@ -202,6 +220,7 @@ class _BottomBar extends StatelessWidget {
     (icon: Icons.receipt_long_rounded, label: 'Expenses'),
     (icon: Icons.savings_rounded, label: 'Budgets'),
     (icon: Icons.foundation_rounded, label: 'Projects'),
+    (icon: Icons.directions_car_rounded, label: 'Vehicles'),
   ];
 
   @override
