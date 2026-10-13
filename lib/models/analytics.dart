@@ -171,6 +171,32 @@ abstract final class Analytics {
     );
   }
 
+  /// Per-category totals of [expenses], biggest first, with no previous
+  /// period to compare against. For a list that has already been narrowed —
+  /// one person, one search — where "how much on groceries, how much on fuel"
+  /// is the question.
+  static List<CategorySlice> slicesOf(List<Expense> expenses) {
+    final total = expenses.fold<double>(0, (s, e) => s + e.amount);
+    final totals = <ExpenseCategory, double>{};
+    final counts = <ExpenseCategory, int>{};
+    for (final e in expenses) {
+      totals[e.category] = (totals[e.category] ?? 0) + e.amount;
+      counts[e.category] = (counts[e.category] ?? 0) + 1;
+    }
+    return totals.entries
+        .map(
+          (entry) => CategorySlice(
+            category: entry.key,
+            total: entry.value,
+            share: total <= 0 ? 0 : entry.value / total,
+            count: counts[entry.key] ?? 0,
+            previousTotal: 0,
+          ),
+        )
+        .toList()
+      ..sort((a, b) => b.total.compareTo(a.total));
+  }
+
   /// Days the period has actually covered — a month that is 10 days old
   /// averages over 10 days, not 31, otherwise every running period looks cheap.
   static int _elapsedDays(DateRange range, DateTime now) {

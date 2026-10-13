@@ -104,6 +104,10 @@ class ExpenseStore extends ChangeNotifier {
   final List<VehicleService> _vehicleServices = [];
   Period _period = Period.month;
   late DateTime _anchor;
+
+  /// Whose spending the screens show. Null is the whole household;
+  /// [unassignedMember] is the expenses nobody is attached to.
+  String? _memberFilter;
   late PeriodSummary _summary;
   List<ProjectSummary> _projectSummaries = const [];
   List<VehicleSummary> _vehicleSummaries = const [];
@@ -122,7 +126,18 @@ class ExpenseStore extends ChangeNotifier {
   DateTime get anchor => _anchor;
   PeriodSummary get summary => _summary;
   int get totalEntryCount => _expenses.length;
+
+  /// Every expense in the household, whoever spent it. Exports and deletes
+  /// work on this, never on the filtered view.
   List<Expense> get allExpenses => List.unmodifiable(_expenses);
+
+  /// Every expense the person filter lets through, all time.
+  List<Expense> get scopedExpenses => List.unmodifiable(_scoped);
+
+  /// How many household expenses fall in the selected period, whoever spent
+  /// them — the "of N" when the list is narrowed to one person.
+  int get householdPeriodCount =>
+      _expenses.where((e) => _summary.range.contains(e.date)).length;
   List<Budget> get budgets => List.unmodifiable(_budgets);
   List<MonthlyIncome> get incomes => List.unmodifiable(_incomes);
 
@@ -166,7 +181,7 @@ class ExpenseStore extends ChangeNotifier {
 
   Map<DateTime, double> dailyTotals(DateTime month) {
     final totals = <DateTime, double>{};
-    for (final expense in _expenses) {
+    for (final expense in _scoped) {
       if (expense.date.year == month.year &&
           expense.date.month == month.month) {
         totals[expense.date] = (totals[expense.date] ?? 0) + expense.amount;
@@ -177,7 +192,7 @@ class ExpenseStore extends ChangeNotifier {
 
   List<Expense> expensesOn(DateTime day) {
     final target = dayOnly(day);
-    return _expenses.where((e) => e.date == target).toList();
+    return _scoped.where((e) => e.date == target).toList();
   }
 
   double spentThisMonth(ExpenseCategory category) => _expenses
@@ -711,9 +726,51 @@ class ExpenseStore extends ChangeNotifier {
     return rows;
   }
 
-  /// The per-person split for the period currently on screen.
-  List<MemberSpend> get spendByMemberThisPeriod =>
-      spendByMember(_summary.expenses);
+  /// The per-person split for the period currently on screen, across the
+  /// whole household — the person filter narrows everything else, but a
+  /// ranking of one person would answer nothing.
+  List<MemberSpend> get spendByMemberThisPeriod => spendByMember(
+    _expenses.where((e) => _summary.range.contains(e.date)).toList(),
+  );
+
+  // ---------------------------------------------------------- person filter ---
+
+  /// Filter value for "expenses with nobody attached".
+  static const unassignedMember = '__none__';
+
+  /// The person every screen is narrowed to, or null for everyone.
+  String? get memberFilter => _memberFilter;
+
+  bool get isMemberFiltered => _memberFilter != null;
+
+  /// "Abba", "Not set", or null when showing everyone.
+  String? get memberFilterLabel => switch (_memberFilter) {
+    null => null,
+    unassignedMember => 'Not set',
+    final id => memberNameFor(id),
+  };
+
+  /// Narrows the Overview, Insights and Expenses to one person — totals,
+  /// categories, trend, calendar and lists all follow. Budgets and pay stay
+  /// household-wide: they are set for the house, not per person.
+  void setMemberFilter(String? memberId) {
+    if (memberId == _memberFilter) return;
+    _memberFilter = memberId;
+    _refresh();
+  }
+
+  bool _passesMemberFilter(Expense expense) {
+    final filter = _memberFilter;
+    if (filter == null) return true;
+    // An id whose person has been removed reads as unattributed, matching the
+    // breakdown and the rows themselves.
+    final actual = memberById(expense.memberId)?.id;
+    return filter == unassignedMember ? actual == null : actual == filter;
+  }
+
+  List<Expense> get _scoped => _memberFilter == null
+      ? _expenses
+      : _expenses.where(_passesMemberFilter).toList();
 
   /// How many expenses have nobody attached — the ones logged before the family
   /// was set up.
@@ -786,6 +843,7 @@ class ExpenseStore extends ChangeNotifier {
       ),
     );
     _members.removeWhere((m) => m.id == memberId);
+    if (_memberFilter == memberId) _memberFilter = null;
     _pending = await _local.pendingCount(userId);
     _refresh();
     _syncSoon();
@@ -822,6 +880,7 @@ class ExpenseStore extends ChangeNotifier {
       _members.clear();
       _vehicles.clear();
       _vehicleServices.clear();
+      _memberFilter = null;
       _loading = false;
       _pending = 0;
       _syncError = null;
@@ -839,6 +898,7 @@ class ExpenseStore extends ChangeNotifier {
     _members.clear();
     _vehicles.clear();
     _vehicleServices.clear();
+    _memberFilter = null;
     _syncError = null;
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
 
@@ -1383,7 +1443,7 @@ class ExpenseStore extends ChangeNotifier {
   }
 
   PeriodSummary _compute() => Analytics.summarize(
-    all: _expenses,
+    all: _scoped,
     period: _period,
     anchor: _anchor,
     now: DateTime.now(),
