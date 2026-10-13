@@ -6,6 +6,7 @@ import '../models/expense_category.dart';
 import '../models/family_member.dart';
 import '../models/income.dart';
 import '../models/project.dart';
+import '../models/vehicle.dart';
 import 'local_db.dart';
 
 /// SQLite copy of the account's data, plus the outbox. Used on Android, iOS and
@@ -24,7 +25,7 @@ class SqfliteLocalDb implements LocalDb {
 
   /// Bumped whenever the tables below change. Every version needs a matching
   /// branch in [_upgradeTo], or an existing install breaks on the next launch.
-  static const schemaVersion = 3;
+  static const schemaVersion = 4;
 
   @override
   Future<void> open() async {
@@ -88,7 +89,7 @@ class SqfliteLocalDb implements LocalDb {
           )
         ''');
         batch.execute('CREATE INDEX outbox_user ON outbox (user_id, op_id)');
-        for (final statement in [..._v2, ..._v3]) {
+        for (final statement in [..._v2, ..._v3, ..._v4]) {
           batch.execute(statement);
         }
         await batch.commit(noResult: true);
@@ -102,6 +103,8 @@ class SqfliteLocalDb implements LocalDb {
       2 => _v2,
       // The family: who spent each expense.
       3 => _v3,
+      // Vehicles: the car and bike service logbook, a separate ledger.
+      4 => _v4,
       _ => const <String>[],
     };
     if (statements.isEmpty) return;
@@ -178,6 +181,50 @@ class SqfliteLocalDb implements LocalDb {
     ''',
     'ALTER TABLE expenses ADD COLUMN member_id TEXT',
     'CREATE INDEX expenses_user_member ON expenses (user_id, member_id)',
+  ];
+
+  /// Added in schema version 4: vehicles and their service history.
+  ///
+  /// Column names match the models' `toJson` keys exactly, so a row is written
+  /// as `{'user_id': ..., ...model.toJson()}` and read back with `fromJson` —
+  /// no hand-written mapping to drift out of step.
+  ///
+  /// No foreign key from services to vehicles, for the reason given on [_v2]:
+  /// `INSERT OR REPLACE` would turn a re-saved vehicle into a cascade delete of
+  /// its history. [removeVehicle] cascades by hand.
+  static const _v4 = <String>[
+    '''
+    CREATE TABLE vehicles (
+      user_id    TEXT    NOT NULL,
+      id         TEXT    NOT NULL,
+      name       TEXT    NOT NULL,
+      kind       TEXT    NOT NULL DEFAULT 'car',
+      plate      TEXT    NOT NULL DEFAULT '',
+      odometer   INTEGER NOT NULL DEFAULT 0,
+      note       TEXT    NOT NULL DEFAULT '',
+      created_at TEXT    NOT NULL,
+      PRIMARY KEY (user_id, id)
+    )
+    ''',
+    '''
+    CREATE TABLE vehicle_services (
+      user_id         TEXT    NOT NULL,
+      id              TEXT    NOT NULL,
+      vehicle_id      TEXT    NOT NULL,
+      service         TEXT    NOT NULL DEFAULT '',
+      serviced_on     TEXT    NOT NULL,
+      odometer        INTEGER NOT NULL,
+      cost            REAL    NOT NULL DEFAULT 0,
+      interval_km     INTEGER,
+      interval_months INTEGER,
+      workshop        TEXT    NOT NULL DEFAULT '',
+      note            TEXT    NOT NULL DEFAULT '',
+      created_at      TEXT    NOT NULL,
+      PRIMARY KEY (user_id, id)
+    )
+    ''',
+    'CREATE INDEX vehicle_services_vehicle '
+        'ON vehicle_services (user_id, vehicle_id, serviced_on DESC)',
   ];
 
   // ------------------------------------------------------------------ reads ---
@@ -303,6 +350,31 @@ class SqfliteLocalDb implements LocalDb {
     note: r['note'] as String? ?? '',
     createdAt: DateTime.parse(r['created_at'] as String),
   );
+
+  @override
+  Future<List<Vehicle>> readVehicles(String userId) async {
+    final rows = await _database.query(
+      'vehicles',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      orderBy: 'created_at ASC',
+    );
+    return rows.map(Vehicle.fromJson).whereType<Vehicle>().toList();
+  }
+
+  @override
+  Future<List<VehicleService>> readVehicleServices(String userId) async {
+    final rows = await _database.query(
+      'vehicle_services',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      orderBy: 'serviced_on DESC, odometer DESC',
+    );
+    return rows
+        .map(VehicleService.fromJson)
+        .whereType<VehicleService>()
+        .toList();
+  }
 
   // ----------------------------------------------------------------- writes ---
 
@@ -471,6 +543,47 @@ class SqfliteLocalDb implements LocalDb {
         whereArgs: [userId, memberId],
       );
     });
+  }
+
+  @override
+  Future<void> putVehicle(String userId, Vehicle vehicle) async {
+    await _database.insert('vehicles', {
+      'user_id': userId,
+      ...vehicle.toJson(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  @override
+  Future<void> removeVehicle(String userId, String vehicleId) async {
+    await _database.transaction((txn) async {
+      await txn.delete(
+        'vehicle_services',
+        where: 'user_id = ? AND vehicle_id = ?',
+        whereArgs: [userId, vehicleId],
+      );
+      await txn.delete(
+        'vehicles',
+        where: 'user_id = ? AND id = ?',
+        whereArgs: [userId, vehicleId],
+      );
+    });
+  }
+
+  @override
+  Future<void> putVehicleService(String userId, VehicleService service) async {
+    await _database.insert('vehicle_services', {
+      'user_id': userId,
+      ...service.toJson(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  @override
+  Future<void> removeVehicleService(String userId, String serviceId) async {
+    await _database.delete(
+      'vehicle_services',
+      where: 'user_id = ? AND id = ?',
+      whereArgs: [userId, serviceId],
+    );
   }
 
   // ------------------------------------------------------------ pull merges ---
@@ -654,6 +767,65 @@ class SqfliteLocalDb implements LocalDb {
     });
   }
 
+  @override
+  Future<void> replaceVehicles(
+    String userId,
+    List<Vehicle> rows, {
+    Set<String> keepKeys = const {},
+  }) => _replaceById(
+    userId,
+    'vehicles',
+    rows.map((v) => v.toJson()).toList(),
+    keepKeys,
+  );
+
+  @override
+  Future<void> replaceVehicleServices(
+    String userId,
+    List<VehicleService> rows, {
+    Set<String> keepKeys = const {},
+  }) => _replaceById(
+    userId,
+    'vehicle_services',
+    rows.map((s) => s.toJson()).toList(),
+    keepKeys,
+  );
+
+  /// The pull merge for tables whose columns match the model's JSON: server
+  /// rows replace local ones, except those in [keepKeys], which have newer
+  /// unsynced edits.
+  Future<void> _replaceById(
+    String userId,
+    String table,
+    List<Map<String, dynamic>> incoming,
+    Set<String> keepKeys,
+  ) async {
+    await _database.transaction((txn) async {
+      final existing = await txn.query(
+        table,
+        columns: ['id'],
+        where: 'user_id = ?',
+        whereArgs: [userId],
+      );
+      for (final row in existing) {
+        final id = row['id'] as String;
+        if (keepKeys.contains(id)) continue;
+        await txn.delete(
+          table,
+          where: 'user_id = ? AND id = ?',
+          whereArgs: [userId, id],
+        );
+      }
+      for (final row in incoming) {
+        if (keepKeys.contains(row['id'])) continue;
+        await txn.insert(table, {
+          'user_id': userId,
+          ...row,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
   // ----------------------------------------------------------------- outbox ---
 
   @override
@@ -731,6 +903,8 @@ class SqfliteLocalDb implements LocalDb {
         'projects',
         'project_entries',
         'family_members',
+        'vehicles',
+        'vehicle_services',
         'outbox',
       ]) {
         await txn.delete(table, where: 'user_id = ?', whereArgs: [userId]);

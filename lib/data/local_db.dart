@@ -6,9 +6,19 @@ import '../models/expense_category.dart';
 import '../models/family_member.dart';
 import '../models/income.dart';
 import '../models/project.dart';
+import '../models/vehicle.dart';
 
 /// Which table a queued change belongs to.
-enum SyncEntity { expense, budget, income, project, projectEntry, member }
+enum SyncEntity {
+  expense,
+  budget,
+  income,
+  project,
+  projectEntry,
+  member,
+  vehicle,
+  vehicleService,
+}
 
 /// What the queued change does.
 enum SyncAction { upsert, delete, deleteAll }
@@ -57,6 +67,13 @@ class PendingOp {
   FamilyMember? get member =>
       entity == SyncEntity.member ? FamilyMember.fromJson(payload) : null;
 
+  Vehicle? get vehicle =>
+      entity == SyncEntity.vehicle ? Vehicle.fromJson(payload) : null;
+
+  VehicleService? get vehicleService => entity == SyncEntity.vehicleService
+      ? VehicleService.fromJson(payload)
+      : null;
+
   ExpenseCategory get category =>
       ExpenseCategory.fromName(payload['category'] as String? ?? 'other');
 
@@ -102,6 +119,8 @@ abstract interface class LocalDb {
   Future<List<Project>> readProjects(String userId);
   Future<List<ProjectEntry>> readProjectEntries(String userId);
   Future<List<FamilyMember>> readMembers(String userId);
+  Future<List<Vehicle>> readVehicles(String userId);
+  Future<List<VehicleService>> readVehicleServices(String userId);
 
   /// Applies a change locally. Used both for the user's own edits and for rows
   /// arriving from a pull.
@@ -123,6 +142,13 @@ abstract interface class LocalDb {
   /// Deletes the member and clears them off every expense that named them,
   /// matching the `on delete set null` on the server so the two copies agree.
   Future<void> removeMember(String userId, String memberId);
+  Future<void> putVehicle(String userId, Vehicle vehicle);
+
+  /// Deletes the vehicle **and its whole service history**, matching the
+  /// cascade on the server.
+  Future<void> removeVehicle(String userId, String vehicleId);
+  Future<void> putVehicleService(String userId, VehicleService service);
+  Future<void> removeVehicleService(String userId, String serviceId);
 
   /// Replaces the local copy of a table with what the server just returned,
   /// while leaving rows named in [keepKeys] alone — those have unsynced edits
@@ -155,6 +181,16 @@ abstract interface class LocalDb {
   Future<void> replaceMembers(
     String userId,
     List<FamilyMember> rows, {
+    Set<String> keepKeys,
+  });
+  Future<void> replaceVehicles(
+    String userId,
+    List<Vehicle> rows, {
+    Set<String> keepKeys,
+  });
+  Future<void> replaceVehicleServices(
+    String userId,
+    List<VehicleService> rows, {
     Set<String> keepKeys,
   });
 

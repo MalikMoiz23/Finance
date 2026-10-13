@@ -144,6 +144,52 @@ create table if not exists public.project_entries (
 create index if not exists project_entries_project_idx
   on public.project_entries (user_id, project_id, spent_on desc);
 
+-- ---------------------------------------------------------------- vehicles ---
+-- The household's cars and bikes, and every tuning or service done on them.
+-- Another separate ledger: service costs never count towards a monthly total,
+-- a category budget, or the savings figure. It is a maintenance logbook.
+create table if not exists public.vehicles (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid()
+               references auth.users (id) on delete cascade,
+  name       text not null check (length(trim(name)) > 0),
+  kind       text not null default 'car' check (kind in ('car', 'bike')),
+  plate      text not null default '',
+  -- Last reading typed in for the vehicle itself, in km.
+  odometer   integer not null default 0 check (odometer >= 0),
+  note       text not null default '',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists vehicles_user_idx
+  on public.vehicles (user_id, created_at);
+
+-- One visit to the workshop. The interval is stored on the record, so changing
+-- a default later never rewrites when an old service said the next was due.
+create table if not exists public.vehicle_services (
+  id              uuid primary key default gen_random_uuid(),
+  user_id         uuid not null default auth.uid()
+                    references auth.users (id) on delete cascade,
+  -- Deleting a vehicle takes its service history with it.
+  vehicle_id      uuid not null
+                    references public.vehicles (id) on delete cascade,
+  service         text not null default '',
+  serviced_on     date not null,
+  odometer        integer not null check (odometer >= 0),
+  cost            numeric(14, 2) not null default 0 check (cost >= 0),
+  -- Due again after this many km / months. Null when that limit does not
+  -- apply; both null means the record is history only.
+  interval_km     integer check (interval_km is null or interval_km > 0),
+  interval_months integer
+                    check (interval_months is null or interval_months > 0),
+  workshop        text not null default '',
+  note            text not null default '',
+  created_at      timestamptz not null default now()
+);
+
+create index if not exists vehicle_services_vehicle_idx
+  on public.vehicle_services (user_id, vehicle_id, serviced_on desc);
+
 -- --------------------------------------------------------------------- RLS ---
 -- Row level security is the only thing separating accounts: the key shipped in
 -- the app is public, so every policy pins rows to auth.uid().
@@ -153,6 +199,8 @@ alter table public.monthly_income  enable row level security;
 alter table public.projects        enable row level security;
 alter table public.project_entries enable row level security;
 alter table public.family_members  enable row level security;
+alter table public.vehicles        enable row level security;
+alter table public.vehicle_services enable row level security;
 
 drop policy if exists expenses_select_own on public.expenses;
 create policy expenses_select_own on public.expenses for select
@@ -292,8 +340,57 @@ drop policy if exists members_delete_own on public.family_members;
 create policy members_delete_own on public.family_members for delete
   to authenticated using (auth.uid() = user_id);
 
+drop policy if exists vehicles_select_own on public.vehicles;
+create policy vehicles_select_own on public.vehicles for select
+  to authenticated using (auth.uid() = user_id);
+
+drop policy if exists vehicles_insert_own on public.vehicles;
+create policy vehicles_insert_own on public.vehicles for insert
+  to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists vehicles_update_own on public.vehicles;
+create policy vehicles_update_own on public.vehicles for update
+  to authenticated using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists vehicles_delete_own on public.vehicles;
+create policy vehicles_delete_own on public.vehicles for delete
+  to authenticated using (auth.uid() = user_id);
+
+-- A service record is reachable only through a vehicle the caller owns, for the
+-- same reason project entries check their project.
+drop policy if exists vehicle_services_select_own on public.vehicle_services;
+create policy vehicle_services_select_own on public.vehicle_services for select
+  to authenticated using (auth.uid() = user_id);
+
+drop policy if exists vehicle_services_insert_own on public.vehicle_services;
+create policy vehicle_services_insert_own on public.vehicle_services for insert
+  to authenticated with check (
+    auth.uid() = user_id
+    and exists (
+      select 1 from public.vehicles v
+      where v.id = vehicle_id and v.user_id = auth.uid()
+    )
+  );
+
+drop policy if exists vehicle_services_update_own on public.vehicle_services;
+create policy vehicle_services_update_own on public.vehicle_services for update
+  to authenticated using (auth.uid() = user_id)
+  with check (
+    auth.uid() = user_id
+    and exists (
+      select 1 from public.vehicles v
+      where v.id = vehicle_id and v.user_id = auth.uid()
+    )
+  );
+
+drop policy if exists vehicle_services_delete_own on public.vehicle_services;
+create policy vehicle_services_delete_own on public.vehicle_services for delete
+  to authenticated using (auth.uid() = user_id);
+
 -- Check after running (expects 4 policies per table):
 --   select tablename, cmd, policyname from pg_policies
 --   where tablename in ('expenses', 'budgets', 'monthly_income',
---                       'projects', 'project_entries', 'family_members')
+--                       'projects', 'project_entries', 'family_members',
+--                       'vehicles', 'vehicle_services')
 --   order by tablename, cmd;

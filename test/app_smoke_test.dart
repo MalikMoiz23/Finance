@@ -29,6 +29,7 @@ class _Harness {
     this.incomes,
     this.projects,
     this.members,
+    this.vehicles,
     this.store,
     this.online,
   );
@@ -39,6 +40,7 @@ class _Harness {
   final FakeIncomeApi incomes;
   final FakeProjectApi projects;
   final FakeMemberApi members;
+  final FakeVehicleApi vehicles;
   final ExpenseStore store;
 
   /// Push false to simulate losing the connection, true to regain it.
@@ -61,6 +63,7 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
   final budgets = FakeBudgetApi(authGateway);
   final incomes = FakeIncomeApi(authGateway);
   final projects = FakeProjectApi(authGateway);
+  final vehicles = FakeVehicleApi(authGateway);
   final prefs = LocalPrefs();
   // In-memory LocalDb: same contract and outbox as SQLite, no plugin needed.
   final localDb = JsonLocalDb(MemoryKeyValueStore());
@@ -74,6 +77,7 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
     incomeApi: incomes,
     projectApi: projects,
     memberApi: members,
+    vehicleApi: vehicles,
     localDb: localDb,
     onlineChanges: online.stream,
   );
@@ -100,6 +104,7 @@ Future<_Harness> _bootApp(WidgetTester tester) async {
     incomes,
     projects,
     members,
+    vehicles,
     store,
     online,
   );

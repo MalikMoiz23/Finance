@@ -12,6 +12,7 @@ import '../data/income_api.dart';
 import '../data/local_db.dart';
 import '../data/member_api.dart';
 import '../data/project_api.dart';
+import '../data/vehicle_api.dart';
 import '../models/analytics.dart';
 import '../models/app_user.dart';
 import '../models/budget.dart';
@@ -22,6 +23,7 @@ import '../models/income.dart';
 import '../models/item_catalog.dart';
 import '../models/period.dart';
 import '../models/project.dart';
+import '../models/vehicle.dart';
 
 /// Where the local copy stands against the server.
 enum SyncState {
@@ -53,6 +55,7 @@ class ExpenseStore extends ChangeNotifier {
     required IncomeApi incomeApi,
     required ProjectApi projectApi,
     required MemberApi memberApi,
+    required VehicleApi vehicleApi,
     required LocalDb localDb,
     Stream<bool>? onlineChanges,
   }) : _api = api,
@@ -60,6 +63,7 @@ class ExpenseStore extends ChangeNotifier {
        _incomeApi = incomeApi,
        _projectApi = projectApi,
        _memberApi = memberApi,
+       _vehicleApi = vehicleApi,
        _local = localDb {
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
     _summary = _compute();
@@ -84,6 +88,7 @@ class ExpenseStore extends ChangeNotifier {
   final IncomeApi _incomeApi;
   final ProjectApi _projectApi;
   final MemberApi _memberApi;
+  final VehicleApi _vehicleApi;
   final LocalDb _local;
   static const _uuid = Uuid();
 
@@ -95,10 +100,13 @@ class ExpenseStore extends ChangeNotifier {
   final List<Project> _projects = [];
   final List<ProjectEntry> _projectEntries = [];
   final List<FamilyMember> _members = [];
+  final List<Vehicle> _vehicles = [];
+  final List<VehicleService> _vehicleServices = [];
   Period _period = Period.month;
   late DateTime _anchor;
   late PeriodSummary _summary;
   List<ProjectSummary> _projectSummaries = const [];
+  List<VehicleSummary> _vehicleSummaries = const [];
 
   String? _userId;
   bool _loading = false;
@@ -448,6 +456,188 @@ class ExpenseStore extends ChangeNotifier {
     note: entry.note,
   );
 
+  // ------------------------------------------------------------- vehicles ---
+  //
+  // The third ledger. Tuning and service costs are deliberately kept out of
+  // every figure above, the same way projects are: this is a maintenance
+  // logbook whose job is to say what was done, at what reading, and when it is
+  // due again — not to make the month of a big service look like a disaster.
+
+  /// Every vehicle with its history, in the order they were added.
+  List<VehicleSummary> get vehicles => _vehicleSummaries;
+
+  bool get hasVehicles => _vehicleSummaries.isNotEmpty;
+
+  VehicleSummary? vehicleById(String id) =>
+      _vehicleSummaries.where((v) => v.id == id).firstOrNull;
+
+  /// Everything spent on every vehicle's servicing, ever.
+  double get vehiclesTotalCost =>
+      _vehicleSummaries.fold<double>(0, (sum, v) => sum + v.totalCost);
+
+  int get vehicleServiceCount =>
+      _vehicleSummaries.fold<int>(0, (sum, v) => sum + v.serviceCount);
+
+  /// Jobs that are overdue or close to it, across every vehicle, most urgent
+  /// first. What the Overview reminder lists.
+  List<({VehicleSummary vehicle, ServiceDue due})> get vehicleAttention {
+    final out = [
+      for (final vehicle in _vehicleSummaries)
+        for (final due in vehicle.dues)
+          if (due.status != DueStatus.ok) (vehicle: vehicle, due: due),
+    ];
+    out.sort((a, b) => ServiceDue.compare(a.due, b.due));
+    return out;
+  }
+
+  Future<Vehicle> createVehicle({
+    required String name,
+    required VehicleKind kind,
+    String plate = '',
+    int odometer = 0,
+    String note = '',
+  }) async {
+    final vehicle = Vehicle(
+      // Generated here so a vehicle added offline keeps its identity — and its
+      // service records keep pointing at it — once it syncs.
+      id: _uuid.v4(),
+      name: name.trim(),
+      kind: kind,
+      plate: plate.trim(),
+      odometer: odometer < 0 ? 0 : odometer,
+      note: note.trim(),
+    );
+    await saveVehicle(vehicle);
+    return vehicle;
+  }
+
+  Future<void> saveVehicle(Vehicle vehicle) async {
+    final userId = _requireUser();
+    await _local.putVehicle(userId, vehicle);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.vehicle,
+        action: SyncAction.upsert,
+        key: vehicle.id,
+        payload: vehicle.toJson(),
+      ),
+    );
+    final index = _vehicles.indexWhere((v) => v.id == vehicle.id);
+    if (index == -1) {
+      _vehicles.add(vehicle);
+    } else {
+      _vehicles[index] = vehicle;
+    }
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  /// Deletes a vehicle and its whole service history.
+  Future<void> deleteVehicle(String vehicleId) async {
+    final userId = _requireUser();
+    final serviceIds = _vehicleServices
+        .where((s) => s.vehicleId == vehicleId)
+        .map((s) => s.id)
+        .toSet();
+
+    await _local.removeVehicle(userId, vehicleId);
+    // Same reasoning as deleteProject: a queued insert for one of these would
+    // reach the server after the vehicle is gone and be refused by the key.
+    await _local.dropQueued(userId, SyncEntity.vehicleService, serviceIds);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.vehicle,
+        action: SyncAction.delete,
+        key: vehicleId,
+        payload: {'id': vehicleId},
+      ),
+    );
+
+    _vehicles.removeWhere((v) => v.id == vehicleId);
+    _vehicleServices.removeWhere((s) => s.vehicleId == vehicleId);
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  Future<VehicleService> addVehicleService({
+    required String vehicleId,
+    required String service,
+    required DateTime date,
+    required int odometer,
+    double cost = 0,
+    int? intervalKm,
+    int? intervalMonths,
+    String workshop = '',
+    String note = '',
+  }) async {
+    final record = VehicleService(
+      id: _uuid.v4(),
+      vehicleId: vehicleId,
+      service: service.trim(),
+      date: date,
+      odometer: odometer,
+      cost: cost < 0 ? 0 : cost,
+      intervalKm: intervalKm != null && intervalKm > 0 ? intervalKm : null,
+      intervalMonths: intervalMonths != null && intervalMonths > 0
+          ? intervalMonths
+          : null,
+      workshop: workshop.trim(),
+      note: note.trim(),
+    );
+    await saveVehicleService(record);
+    return record;
+  }
+
+  Future<void> saveVehicleService(VehicleService record) async {
+    final userId = _requireUser();
+    await _local.putVehicleService(userId, record);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.vehicleService,
+        action: SyncAction.upsert,
+        key: record.id,
+        payload: record.toJson(),
+      ),
+    );
+    final index = _vehicleServices.indexWhere((s) => s.id == record.id);
+    if (index == -1) {
+      _vehicleServices.add(record);
+    } else {
+      _vehicleServices[index] = record;
+    }
+    _sortVehicleServices();
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  Future<void> deleteVehicleService(String serviceId) async {
+    final userId = _requireUser();
+    await _local.removeVehicleService(userId, serviceId);
+    await _local.enqueue(
+      userId,
+      PendingOp(
+        entity: SyncEntity.vehicleService,
+        action: SyncAction.delete,
+        key: serviceId,
+        payload: {'id': serviceId},
+      ),
+    );
+    _vehicleServices.removeWhere((s) => s.id == serviceId);
+    _pending = await _local.pendingCount(userId);
+    _refresh();
+    _syncSoon();
+  }
+
+  /// Undo for a deleted record: written back as it was.
+  Future<void> restoreVehicleService(VehicleService record) =>
+      saveVehicleService(record);
+
   // --------------------------------------------------------------- family ---
   //
   // One login for the whole house, so a member is a label rather than an
@@ -630,6 +820,8 @@ class ExpenseStore extends ChangeNotifier {
       _projects.clear();
       _projectEntries.clear();
       _members.clear();
+      _vehicles.clear();
+      _vehicleServices.clear();
       _loading = false;
       _pending = 0;
       _syncError = null;
@@ -645,6 +837,8 @@ class ExpenseStore extends ChangeNotifier {
     _projects.clear();
     _projectEntries.clear();
     _members.clear();
+    _vehicles.clear();
+    _vehicleServices.clear();
     _syncError = null;
     _anchor = Periods.normalizeAnchor(_period, DateTime.now());
 
@@ -660,6 +854,8 @@ class ExpenseStore extends ChangeNotifier {
     final projects = await _local.readProjects(userId);
     final projectEntries = await _local.readProjectEntries(userId);
     final members = await _local.readMembers(userId);
+    final vehicles = await _local.readVehicles(userId);
+    final vehicleServices = await _local.readVehicleServices(userId);
     final pending = await _local.pendingCount(userId);
     if (_userId != userId) return;
     _expenses
@@ -680,8 +876,15 @@ class ExpenseStore extends ChangeNotifier {
     _members
       ..clear()
       ..addAll(members);
+    _vehicles
+      ..clear()
+      ..addAll(vehicles);
+    _vehicleServices
+      ..clear()
+      ..addAll(vehicleServices);
     _sort();
     _sortProjectEntries();
+    _sortVehicleServices();
     _pending = pending;
     _refresh();
   }
@@ -744,7 +947,9 @@ class ExpenseStore extends ChangeNotifier {
     // expense upserts that clear them off, or those upserts arrive still
     // naming a member the server has already dropped.
     bool isParent(PendingOp op) =>
-        op.entity == SyncEntity.project || op.entity == SyncEntity.member;
+        op.entity == SyncEntity.project ||
+        op.entity == SyncEntity.member ||
+        op.entity == SyncEntity.vehicle;
     final ops = [
       ...queued.where((o) => isParent(o) && o.action != SyncAction.delete),
       ...queued.where((o) => !isParent(o)),
@@ -793,10 +998,22 @@ class ExpenseStore extends ChangeNotifier {
           if (member != null) await _memberApi.upsert(member);
         case (SyncEntity.member, SyncAction.delete):
           await _memberApi.delete(op.key);
+        case (SyncEntity.vehicle, SyncAction.upsert):
+          final vehicle = op.vehicle;
+          if (vehicle != null) await _vehicleApi.upsertVehicle(vehicle);
+        case (SyncEntity.vehicle, SyncAction.delete):
+          await _vehicleApi.deleteVehicle(op.key);
+        case (SyncEntity.vehicleService, SyncAction.upsert):
+          final record = op.vehicleService;
+          if (record != null) await _vehicleApi.upsertService(record);
+        case (SyncEntity.vehicleService, SyncAction.delete):
+          await _vehicleApi.deleteService(op.key);
         case (SyncEntity.project, SyncAction.deleteAll):
         case (SyncEntity.projectEntry, SyncAction.deleteAll):
         case (SyncEntity.member, SyncAction.deleteAll):
-          break; // projects and people are removed one at a time
+        case (SyncEntity.vehicle, SyncAction.deleteAll):
+        case (SyncEntity.vehicleService, SyncAction.deleteAll):
+          break; // projects, people and vehicles are removed one at a time
       }
       await _local.completeOp(userId, op.id);
       _pending = await _local.pendingCount(userId);
@@ -813,6 +1030,8 @@ class ExpenseStore extends ChangeNotifier {
     final remoteProjects = await _projectApi.fetchProjects();
     final remoteEntries = await _projectApi.fetchEntries();
     final remoteMembers = await _memberApi.fetchAll();
+    final remoteVehicles = await _vehicleApi.fetchVehicles();
+    final remoteServices = await _vehicleApi.fetchServices();
     if (_userId != userId) return;
 
     final ops = await _local.pendingOps(userId);
@@ -854,6 +1073,17 @@ class ExpenseStore extends ChangeNotifier {
       userId,
       remoteEntries,
       keepKeys: keys(SyncEntity.projectEntry),
+    );
+    // Vehicles before their history, for the same reason as projects.
+    await _local.replaceVehicles(
+      userId,
+      remoteVehicles,
+      keepKeys: keys(SyncEntity.vehicle),
+    );
+    await _local.replaceVehicleServices(
+      userId,
+      remoteServices,
+      keepKeys: keys(SyncEntity.vehicleService),
     );
     await _loadFromLocal(userId);
   }
@@ -1143,6 +1373,15 @@ class ExpenseStore extends ChangeNotifier {
     });
   }
 
+  void _sortVehicleServices() {
+    _vehicleServices.sort((a, b) {
+      final byDate = b.date.compareTo(a.date);
+      if (byDate != 0) return byDate;
+      final byKm = b.odometer.compareTo(a.odometer);
+      return byKm != 0 ? byKm : b.createdAt.compareTo(a.createdAt);
+    });
+  }
+
   PeriodSummary _compute() => Analytics.summarize(
     all: _expenses,
     period: _period,
@@ -1176,9 +1415,28 @@ class ExpenseStore extends ChangeNotifier {
     return summaries;
   }
 
+  /// Pairs each vehicle with its history, measured against today.
+  List<VehicleSummary> _computeVehicles() {
+    if (_vehicles.isEmpty) return const [];
+    final byVehicle = <String, List<VehicleService>>{};
+    for (final record in _vehicleServices) {
+      byVehicle.putIfAbsent(record.vehicleId, () => []).add(record);
+    }
+    final today = DateTime.now();
+    return [
+      for (final vehicle in _vehicles)
+        VehicleSummary(
+          vehicle: vehicle,
+          services: byVehicle[vehicle.id] ?? const [],
+          today: today,
+        ),
+    ];
+  }
+
   void _refresh() {
     _summary = _compute();
     _projectSummaries = _computeProjects();
+    _vehicleSummaries = _computeVehicles();
     if (!_disposed) notifyListeners();
   }
 

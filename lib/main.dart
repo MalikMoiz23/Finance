@@ -12,6 +12,7 @@ import 'data/local_db_factory.dart';
 import 'data/local_prefs.dart';
 import 'data/member_api.dart';
 import 'data/project_api.dart';
+import 'data/vehicle_api.dart';
 import 'state/auth_controller.dart';
 import 'state/expense_store.dart';
 import 'state/theme_controller.dart';
@@ -50,6 +51,7 @@ Future<void> main() async {
             incomeApi: SupabaseIncomeApi(client),
             projectApi: SupabaseProjectApi(client),
             memberApi: SupabaseMemberApi(client),
+            vehicleApi: SupabaseVehicleApi(client),
             localDb: createLocalDb(),
           ),
         ),

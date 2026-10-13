@@ -8,6 +8,7 @@ import '../models/expense_category.dart';
 import '../models/family_member.dart';
 import '../models/income.dart';
 import '../models/project.dart';
+import '../models/vehicle.dart';
 import 'local_db.dart';
 
 /// Somewhere to put strings. Lets the same LocalDb logic run on preferences
@@ -155,6 +156,29 @@ class JsonLocalDb implements LocalDb {
       'family_members',
     )).map(FamilyMember.fromJson).whereType<FamilyMember>().toList();
     out.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return out;
+  }
+
+  @override
+  Future<List<Vehicle>> readVehicles(String userId) async {
+    final out = (await _list(
+      userId,
+      'vehicles',
+    )).map(Vehicle.fromJson).whereType<Vehicle>().toList();
+    out.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    return out;
+  }
+
+  @override
+  Future<List<VehicleService>> readVehicleServices(String userId) async {
+    final out = (await _list(
+      userId,
+      'vehicle_services',
+    )).map(VehicleService.fromJson).whereType<VehicleService>().toList();
+    out.sort((a, b) {
+      final byDate = b.date.compareTo(a.date);
+      return byDate != 0 ? byDate : b.odometer.compareTo(a.odometer);
+    });
     return out;
   }
 
@@ -308,6 +332,49 @@ class JsonLocalDb implements LocalDb {
     if (touched) await _save(userId, 'expenses', expenses);
   }
 
+  @override
+  Future<void> putVehicle(String userId, Vehicle vehicle) =>
+      _serial(() => _putRow(userId, 'vehicles', vehicle.toJson()));
+
+  @override
+  Future<void> removeVehicle(String userId, String vehicleId) =>
+      _serial(() => _removeVehicle(userId, vehicleId));
+
+  Future<void> _removeVehicle(String userId, String vehicleId) async {
+    final vehicles = await _list(userId, 'vehicles')
+      ..removeWhere((r) => r['id'] == vehicleId);
+    await _save(userId, 'vehicles', vehicles);
+    // The cascade the server does: a service record with no vehicle would
+    // never be reachable again.
+    final services = await _list(userId, 'vehicle_services')
+      ..removeWhere((r) => r['vehicle_id'] == vehicleId);
+    await _save(userId, 'vehicle_services', services);
+  }
+
+  @override
+  Future<void> putVehicleService(String userId, VehicleService service) =>
+      _serial(() => _putRow(userId, 'vehicle_services', service.toJson()));
+
+  @override
+  Future<void> removeVehicleService(String userId, String serviceId) =>
+      _serial(() async {
+        final rows = await _list(userId, 'vehicle_services')
+          ..removeWhere((r) => r['id'] == serviceId);
+        await _save(userId, 'vehicle_services', rows);
+      });
+
+  /// Insert-or-replace by `id`, for the tables keyed that way.
+  Future<void> _putRow(
+    String userId,
+    String table,
+    Map<String, dynamic> row,
+  ) async {
+    final rows = await _list(userId, table)
+      ..removeWhere((r) => r['id'] == row['id']);
+    rows.add(row);
+    await _save(userId, table, rows);
+  }
+
   // ------------------------------------------------------------ pull merges ---
 
   @override
@@ -442,6 +509,50 @@ class JsonLocalDb implements LocalDb {
     await _save(userId, 'family_members', [...kept, ...incoming]);
   }
 
+  @override
+  Future<void> replaceVehicles(
+    String userId,
+    List<Vehicle> rows, {
+    Set<String> keepKeys = const {},
+  }) => _serial(
+    () => _replaceById(
+      userId,
+      'vehicles',
+      rows.map((v) => v.toJson()).toList(),
+      keepKeys,
+    ),
+  );
+
+  @override
+  Future<void> replaceVehicleServices(
+    String userId,
+    List<VehicleService> rows, {
+    Set<String> keepKeys = const {},
+  }) => _serial(
+    () => _replaceById(
+      userId,
+      'vehicle_services',
+      rows.map((s) => s.toJson()).toList(),
+      keepKeys,
+    ),
+  );
+
+  /// The pull merge for tables keyed by `id`: server rows replace local ones,
+  /// except those named in [keepKeys], which have newer unsynced edits.
+  Future<void> _replaceById(
+    String userId,
+    String table,
+    List<Map<String, dynamic>> incoming,
+    Set<String> keepKeys,
+  ) async {
+    final existing = await _list(userId, table);
+    final kept = existing
+        .where((r) => keepKeys.contains(r['id'] as String? ?? ''))
+        .toList();
+    final fresh = incoming.where((r) => !keepKeys.contains(r['id']));
+    await _save(userId, table, [...kept, ...fresh]);
+  }
+
   // ----------------------------------------------------------------- outbox ---
 
   @override
@@ -521,6 +632,8 @@ class JsonLocalDb implements LocalDb {
       'projects',
       'project_entries',
       'family_members',
+      'vehicles',
+      'vehicle_services',
       'outbox',
     ]) {
       await _store.remove(_key(userId, table));

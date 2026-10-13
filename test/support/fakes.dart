@@ -6,6 +6,7 @@ import 'package:finance/data/expense_api.dart';
 import 'package:finance/data/income_api.dart';
 import 'package:finance/data/member_api.dart';
 import 'package:finance/data/project_api.dart';
+import 'package:finance/data/vehicle_api.dart';
 import 'package:finance/models/app_user.dart';
 import 'package:finance/models/budget.dart';
 import 'package:finance/models/family_member.dart';
@@ -13,6 +14,7 @@ import 'package:finance/models/income.dart';
 import 'package:finance/models/expense.dart';
 import 'package:finance/models/expense_category.dart';
 import 'package:finance/models/project.dart';
+import 'package:finance/models/vehicle.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' show AuthException;
 
 /// In-memory stand-ins for Supabase, so the widget tests exercise the real
@@ -467,5 +469,98 @@ class FakeProjectApi implements ProjectApi {
   Future<void> deleteEntry(String id) async {
     _guard(write: true);
     (_entries[_userId] ?? []).removeWhere((e) => e.id == id);
+  }
+}
+
+/// Vehicles and their service history per user id.
+///
+/// Enforces the server's foreign key the same way [FakeProjectApi] does: a
+/// record whose vehicle is not there is rejected, and deleting a vehicle takes
+/// its history with it.
+class FakeVehicleApi implements VehicleApi {
+  FakeVehicleApi(this._auth);
+
+  final FakeAuthGateway _auth;
+  final Map<String, List<Vehicle>> _vehicles = {};
+  final Map<String, List<VehicleService>> _services = {};
+
+  bool offline = false;
+  bool failNextWrite = false;
+
+  String get _userId {
+    final id = _auth.currentUser?.id;
+    if (id == null) throw StateError('Not signed in');
+    return id;
+  }
+
+  List<Vehicle> vehiclesFor(String userId) =>
+      List.unmodifiable(_vehicles[userId] ?? []);
+
+  List<VehicleService> servicesFor(String userId) =>
+      List.unmodifiable(_services[userId] ?? []);
+
+  void _guard({bool write = false}) {
+    if (offline) throw Exception('ClientException: Failed host lookup');
+    if (write && failNextWrite) {
+      failNextWrite = false;
+      throw Exception('ClientException: connection closed');
+    }
+  }
+
+  @override
+  Future<List<Vehicle>> fetchVehicles() async {
+    _guard();
+    return [...?_vehicles[_userId]];
+  }
+
+  @override
+  Future<List<VehicleService>> fetchServices() async {
+    _guard();
+    return [...?_services[_userId]];
+  }
+
+  @override
+  Future<void> upsertVehicle(Vehicle vehicle) async {
+    _guard(write: true);
+    final rows = _vehicles.putIfAbsent(_userId, () => []);
+    final index = rows.indexWhere((v) => v.id == vehicle.id);
+    if (index == -1) {
+      rows.add(vehicle);
+    } else {
+      rows[index] = vehicle;
+    }
+  }
+
+  @override
+  Future<void> deleteVehicle(String id) async {
+    _guard(write: true);
+    (_vehicles[_userId] ?? []).removeWhere((v) => v.id == id);
+    // `on delete cascade` on vehicle_services.vehicle_id.
+    (_services[_userId] ?? []).removeWhere((s) => s.vehicleId == id);
+  }
+
+  @override
+  Future<void> upsertService(VehicleService service) async {
+    _guard(write: true);
+    final vehicles = _vehicles[_userId] ?? const <Vehicle>[];
+    if (!vehicles.any((v) => v.id == service.vehicleId)) {
+      throw Exception(
+        'PostgrestException: insert or update on table "vehicle_services" '
+        'violates foreign key constraint',
+      );
+    }
+    final rows = _services.putIfAbsent(_userId, () => []);
+    final index = rows.indexWhere((s) => s.id == service.id);
+    if (index == -1) {
+      rows.add(service);
+    } else {
+      rows[index] = service;
+    }
+  }
+
+  @override
+  Future<void> deleteService(String id) async {
+    _guard(write: true);
+    (_services[_userId] ?? []).removeWhere((s) => s.id == id);
   }
 }
