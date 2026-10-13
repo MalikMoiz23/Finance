@@ -43,3 +43,24 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Secrets: environment files, signing keys and their passwords
+.env
+.env.*
+*.keystore
+*.jks
+key.properties
+local.properties
+
+# Built packages
+*.apk
+*.aab
+*.ipa
+
+# OS clutter
+Thumbs.db
+desktop.ini
+*.tmp
+
+# Local editor settings
+.vscode/settings.json
